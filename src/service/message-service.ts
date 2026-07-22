@@ -4,6 +4,7 @@ import type { StateStore } from "../state/store.js";
 import type { MessageEvent } from "../types.js";
 
 export function shouldHandleEvent(event: MessageEvent, botIdentity: string): boolean {
+  if (event.chat_type === "p2p") return true;
   return event.chat_type === "group" && Boolean(event.mentions?.some((mention) => mention.id === botIdentity || mention.name === botIdentity));
 }
 

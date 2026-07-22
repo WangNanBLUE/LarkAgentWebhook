@@ -19,7 +19,7 @@ describe("CLI failures", () => {
 });
 
 describe("message routing", () => {
-  test("accepts only group messages that mention this bot", () => {
+  test("accepts direct messages and only mentioned group messages", () => {
     const base = {
       message_id: "om_1",
       chat_id: "oc_1",
@@ -30,7 +30,8 @@ describe("message routing", () => {
     };
 
     expect(shouldHandleEvent(base, "ou_bot")).toBe(true);
-    expect(shouldHandleEvent({ ...base, chat_type: "p2p" }, "ou_bot")).toBe(false);
+    expect(shouldHandleEvent({ ...base, chat_type: "p2p", mentions: undefined }, "ou_bot")).toBe(true);
+    expect(shouldHandleEvent({ ...base, mentions: undefined }, "ou_bot")).toBe(false);
     expect(shouldHandleEvent(base, "ou_other_bot")).toBe(false);
   });
 
