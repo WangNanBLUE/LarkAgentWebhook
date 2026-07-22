@@ -72,13 +72,16 @@ export class MessageService {
   }
 
   private async reply(event: MessageEvent, content: string): Promise<void> {
-    const replyInThread = event.chat_type === "group";
-    await this.tools.reply(event.message_id, content, replyInThread);
+    const replyInThread = false;
+    const replyContent = event.chat_type === "group"
+      ? `<at user_id="${event.sender_id}"></at> ${content}`
+      : content;
+    await this.tools.reply(event.message_id, replyContent, replyInThread);
     writeMessageLog("message.sent", {
       reply_to_message_id: event.message_id,
       chat_id: event.chat_id,
       reply_in_thread: replyInThread,
-      content,
+      content: replyContent,
     });
   }
 }

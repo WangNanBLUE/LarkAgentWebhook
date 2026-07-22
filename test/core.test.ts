@@ -70,6 +70,30 @@ describe("message routing", () => {
 
     expect(tools.reply).toHaveBeenCalledWith("om_dm", "你好，有什么可以帮你？", false);
   });
+
+  test("replies to mentioned group messages in the main stream and mentions the sender", async () => {
+    const event = {
+      message_id: "om_group",
+      chat_id: "oc_group",
+      sender_id: "ou_sender",
+      chat_type: "group" as const,
+      content: "@竞品分析 分析来源分布",
+      mentions: [{ id: "ou_bot", key: "@_user_1", name: "竞品分析" }],
+    };
+    const state = { markMessageProcessed: vi.fn(() => true) };
+    const agent = { run: vi.fn(async () => "分析完成") };
+    const tools = { reply: vi.fn(async () => ({})) };
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    await new MessageService("ou_bot", state as never, agent as never, tools as never).handle(event);
+    write.mockRestore();
+
+    expect(tools.reply).toHaveBeenCalledWith(
+      "om_group",
+      '<at user_id="ou_sender"></at> 分析完成',
+      false,
+    );
+  });
 });
 
 describe("state", () => {
