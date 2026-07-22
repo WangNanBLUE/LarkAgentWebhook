@@ -16,6 +16,15 @@ interface RunContext {
   conversationKey: string;
 }
 
+export interface AgentRunObserver {
+  onTextDelta(delta: string, fullText: string): void;
+  onToolStart(name: string): void;
+  onToolEnd(): void;
+}
+
+type ResponsesClient = Pick<OpenAI["responses"], "stream">;
+type ResponseStreamParams = Parameters<ResponsesClient["stream"]>[0];
+
 const aggregateArgsSchema = z.object({
   dimensions: z.array(z.object({ field_name: z.string().min(1), alias: z.string().min(1).nullable() })).max(5),
   measures: z.array(z.object({
@@ -49,29 +58,38 @@ export function buildAggregateQuery(raw: unknown): Record<string, unknown> {
 }
 
 export class AgentRunner {
-  private readonly client: OpenAI;
+  private readonly responses: ResponsesClient;
 
-  constructor(private readonly config: AppConfig, private readonly tools: BaseTools, private readonly state: StateStore) {
-    this.client = new OpenAI({ baseURL: config.openai.baseURL, apiKey: config.openai.apiKey });
+  constructor(
+    private readonly config: AppConfig,
+    private readonly tools: BaseTools,
+    private readonly state: StateStore,
+    responses?: ResponsesClient,
+  ) {
+    this.responses = responses ?? new OpenAI({ baseURL: config.openai.baseURL, apiKey: config.openai.apiKey }).responses;
   }
 
-  async run(context: RunContext): Promise<string> {
+  async run(context: RunContext, observer?: AgentRunObserver): Promise<string> {
     const input: Responses.ResponseInput = [{ role: "user", content: context.prompt }];
     const deadline = Date.now() + this.config.agent.timeoutMs;
+    let displayedText = "";
 
     for (let round = 0; round < this.config.agent.maxToolRounds; round += 1) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) throw new Error("Agent request timed out");
-      const response = await this.client.responses.create({
+      const { response, roundText } = await this.streamResponse({
         model: this.config.openai.model,
         instructions: AGENT_INSTRUCTIONS,
         input,
         tools: TOOL_DEFINITIONS,
         store: false,
-      }, { signal: AbortSignal.timeout(remaining) });
+      }, remaining, observer, (delta) => {
+        displayedText += delta;
+        return displayedText;
+      });
 
       const calls = response.output.filter((item): item is Responses.ResponseFunctionToolCall => item.type === "function_call");
-      if (calls.length === 0) return response.output_text || "未生成有效回答。";
+      if (calls.length === 0) return response.output_text || roundText || "未生成有效回答。";
 
       input.push(...response.output);
       for (const call of calls) {
@@ -86,18 +104,41 @@ export class AgentRunner {
           process.stdout.write(`${JSON.stringify({ timestamp: new Date().toISOString(), type: "agent.tool", round: round + 1, name: call.name, status: "failed", error: message.slice(0, 300) })}\n`);
         }
       }
+      observer?.onToolEnd();
     }
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new Error("Agent request timed out");
-    const finalResponse = await this.client.responses.create({
+    const { response: finalResponse, roundText } = await this.streamResponse({
       model: this.config.openai.model,
       instructions: `${AGENT_INSTRUCTIONS}\n工具调用预算已用完。请只根据已有工具结果给出最终回答；不得再调用工具。若数据不足，明确说明缺少什么。`,
       input,
       tools: TOOL_DEFINITIONS,
       tool_choice: "none",
       store: false,
-    }, { signal: AbortSignal.timeout(remaining) });
-    return finalResponse.output_text || "已完成查询，但未生成有效总结。";
+    }, remaining, observer, (delta) => {
+      displayedText += delta;
+      return displayedText;
+    });
+    return finalResponse.output_text || roundText || "已完成查询，但未生成有效总结。";
+  }
+
+  private async streamResponse(
+    params: ResponseStreamParams,
+    remaining: number,
+    observer: AgentRunObserver | undefined,
+    appendDisplayedText: (delta: string) => string,
+  ): Promise<{ response: Responses.Response; roundText: string }> {
+    const stream = this.responses.stream(params, { signal: AbortSignal.timeout(remaining) });
+    let roundText = "";
+    for await (const event of stream) {
+      if (event.type === "response.output_text.delta") {
+        roundText += event.delta;
+        observer?.onTextDelta(event.delta, appendDisplayedText(event.delta));
+      } else if (event.type === "response.output_item.added" && event.item.type === "function_call") {
+        observer?.onToolStart(event.item.name);
+      }
+    }
+    return { response: await stream.finalResponse(), roundText };
   }
 
   private async executeTool(name: string, args: Record<string, unknown>, context: RunContext): Promise<unknown> {

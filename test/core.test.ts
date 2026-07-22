@@ -2,13 +2,92 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { classifyCliError } from "../src/lark/errors.js";
 import { StateStore } from "../src/state/store.js";
 import { MessageService, shouldHandleEvent, writeMessageLog } from "../src/service/message-service.js";
-import { addDashboardDateFilter, buildAggregateQuery } from "../src/agent/runner.js";
+import { AgentRunner, addDashboardDateFilter, buildAggregateQuery } from "../src/agent/runner.js";
 import { validateDashboardConfig } from "../src/lark/base-tools.js";
+import { loadConfig } from "../src/config.js";
 
 const stores: StateStore[] = [];
 
+const configEnv = {
+  OPENAI_BASE_URL: "https://example.test/v1",
+  OPENAI_API_KEY: "test-key",
+  OPENAI_MODEL: "test-model",
+  LARK_EXPECTED_APP_ID: "cli_test",
+};
+
 afterEach(() => {
   for (const store of stores.splice(0)) store.close();
+});
+
+describe("configuration", () => {
+  test("defaults to streaming cards and supports explicit text mode", () => {
+    expect(loadConfig(configEnv).lark.responseMode).toBe("streaming_card");
+    expect(loadConfig({ ...configEnv, LARK_RESPONSE_MODE: "text" }).lark.responseMode).toBe("text");
+  });
+
+  test("rejects unknown response modes", () => {
+    expect(() => loadConfig({ ...configEnv, LARK_RESPONSE_MODE: "invalid" })).toThrow();
+  });
+});
+
+describe("agent streaming", () => {
+  test("streams text and reports tool progress across response rounds", async () => {
+    const call = {
+      type: "function_call",
+      id: "fc_1",
+      call_id: "call_1",
+      name: "get_source_schema",
+      arguments: "{}",
+      status: "completed",
+    };
+    const makeStream = (events: unknown[], response: unknown) => ({
+      async *[Symbol.asyncIterator]() {
+        for (const event of events) yield event;
+      },
+      finalResponse: vi.fn(async () => response),
+    });
+    const responses = {
+      stream: vi.fn()
+        .mockReturnValueOnce(makeStream([
+          { type: "response.output_item.added", item: call },
+        ], { output: [call], output_text: "" }))
+        .mockReturnValueOnce(makeStream([
+          { type: "response.output_text.delta", delta: "分析" },
+          { type: "response.output_text.delta", delta: "完成" },
+        ], { output: [{ type: "message" }], output_text: "分析完成" })),
+    };
+    const tools = { getSourceSchema: vi.fn(async () => ({ fields: [] })) };
+    const observer = {
+      onTextDelta: vi.fn(),
+      onToolStart: vi.fn(),
+      onToolEnd: vi.fn(),
+    };
+    const runner = new AgentRunner(
+      loadConfig(configEnv),
+      tools as never,
+      {} as never,
+      responses as never,
+    );
+
+    const answer = await runner.run({
+      event: {
+        message_id: "om_1",
+        chat_id: "oc_1",
+        sender_id: "ou_1",
+        chat_type: "p2p",
+        content: "分析",
+      },
+      prompt: "分析",
+      conversationKey: "om_1",
+    }, observer);
+
+    expect(observer.onToolStart).toHaveBeenCalledWith("get_source_schema");
+    expect(observer.onToolEnd).toHaveBeenCalledTimes(1);
+    expect(observer.onTextDelta).toHaveBeenNthCalledWith(1, "分析", "分析");
+    expect(observer.onTextDelta).toHaveBeenNthCalledWith(2, "完成", "分析完成");
+    expect(answer).toBe("分析完成");
+    expect(responses.stream).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("CLI failures", () => {
@@ -91,6 +170,138 @@ describe("message routing", () => {
     expect(tools.reply).toHaveBeenCalledWith(
       "om_group",
       '<at user_id="ou_sender"></at> 分析完成',
+      false,
+    );
+  });
+
+  test("streams a card before running the agent and forwards progress", async () => {
+    const order: string[] = [];
+    const event = {
+      message_id: "om_stream",
+      chat_id: "oc_group",
+      sender_id: "ou_sender",
+      chat_type: "group" as const,
+      content: "@竞品分析 分析来源分布",
+      mentions: [{ id: "ou_bot", key: "@_user_1", name: "竞品分析" }],
+    };
+    const state = { markMessageProcessed: vi.fn(() => true) };
+    const session = {
+      appendText: vi.fn(),
+      setStatus: vi.fn(),
+      finish: vi.fn(async () => true),
+      fail: vi.fn(async () => true),
+    };
+    const cards = { start: vi.fn(async () => { order.push("card.start"); return session; }) };
+    const agent = { run: vi.fn(async (_context, observer) => {
+      order.push("agent.run");
+      observer.onTextDelta("分析", "分析");
+      observer.onToolStart("aggregate_books");
+      observer.onToolEnd();
+      observer.onTextDelta("完成", "分析完成");
+      return "分析完成";
+    }) };
+    const tools = { reply: vi.fn(async () => ({})) };
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    await new MessageService(
+      "ou_bot", state as never, agent as never, tools as never, "streaming_card", cards as never,
+    ).handle(event);
+    write.mockRestore();
+
+    expect(order.slice(0, 2)).toEqual(["card.start", "agent.run"]);
+    expect(session.appendText).toHaveBeenNthCalledWith(1, "分析");
+    expect(session.appendText).toHaveBeenNthCalledWith(2, "完成");
+    expect(session.setStatus).toHaveBeenNthCalledWith(1, "querying");
+    expect(session.setStatus).toHaveBeenNthCalledWith(2, "summarizing");
+    expect(session.finish).toHaveBeenCalledWith("分析完成");
+    expect(tools.reply).not.toHaveBeenCalled();
+  });
+
+  test("falls back once in the group thread when card creation fails", async () => {
+    const event = {
+      message_id: "om_start_failure",
+      chat_id: "oc_group",
+      sender_id: "ou_sender",
+      chat_type: "group" as const,
+      content: "@竞品分析 分析",
+      mentions: [{ id: "ou_bot", key: "@_user_1", name: "竞品分析" }],
+    };
+    const state = { markMessageProcessed: vi.fn(() => true) };
+    const agent = { run: vi.fn(async () => "分析完成") };
+    const tools = { reply: vi.fn(async () => ({})) };
+    const cards = { start: vi.fn(async () => { throw new Error("missing scope"); }) };
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    await new MessageService(
+      "ou_bot", state as never, agent as never, tools as never, "streaming_card", cards as never,
+    ).handle(event);
+    stdout.mockRestore();
+    stderr.mockRestore();
+
+    expect(tools.reply).toHaveBeenCalledTimes(1);
+    expect(tools.reply).toHaveBeenCalledWith(
+      "om_start_failure",
+      expect.stringContaining("分析完成"),
+      true,
+    );
+  });
+
+  test("falls back once when the final card update fails", async () => {
+    const event = {
+      message_id: "om_finish_failure",
+      chat_id: "oc_group",
+      sender_id: "ou_sender",
+      chat_type: "group" as const,
+      content: "@竞品分析 分析",
+      mentions: [{ id: "ou_bot", key: "@_user_1", name: "竞品分析" }],
+    };
+    const state = { markMessageProcessed: vi.fn(() => true) };
+    const agent = { run: vi.fn(async () => "分析完成") };
+    const tools = { reply: vi.fn(async () => ({})) };
+    const session = {
+      appendText: vi.fn(), setStatus: vi.fn(), finish: vi.fn(async () => false), fail: vi.fn(async () => false),
+    };
+    const cards = { start: vi.fn(async () => session) };
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    await new MessageService(
+      "ou_bot", state as never, agent as never, tools as never, "streaming_card", cards as never,
+    ).handle(event);
+    stdout.mockRestore();
+
+    expect(tools.reply).toHaveBeenCalledTimes(1);
+    expect(tools.reply).toHaveBeenCalledWith(
+      "om_finish_failure",
+      expect.stringContaining("分析完成"),
+      true,
+    );
+  });
+
+  test("keeps explicit text mode in the main chat stream", async () => {
+    const event = {
+      message_id: "om_text",
+      chat_id: "oc_group",
+      sender_id: "ou_sender",
+      chat_type: "group" as const,
+      content: "@竞品分析 分析",
+      mentions: [{ id: "ou_bot", key: "@_user_1", name: "竞品分析" }],
+    };
+    const state = { markMessageProcessed: vi.fn(() => true) };
+    const agent = { run: vi.fn(async () => "分析完成") };
+    const tools = { reply: vi.fn(async () => ({})) };
+    const cards = { start: vi.fn() };
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    await new MessageService(
+      "ou_bot", state as never, agent as never, tools as never, "text", cards as never,
+    ).handle(event);
+    stdout.mockRestore();
+
+    expect(cards.start).not.toHaveBeenCalled();
+    expect(tools.reply).toHaveBeenCalledWith(
+      "om_text",
+      expect.stringContaining("分析完成"),
       false,
     );
   });

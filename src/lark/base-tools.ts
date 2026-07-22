@@ -238,6 +238,23 @@ export class BaseTools {
     return this.cli.runRetryable(args);
   }
 
+  replyCard(messageId: string, cardId: string, replyInThread: boolean): Promise<unknown> {
+    const content = JSON.stringify({ type: "card", data: { card_id: cardId } });
+    const key = createHash("sha256")
+      .update(`${replyInThread ? "thread" : "main"}:${messageId}:${cardId}`)
+      .digest("hex")
+      .slice(0, 48);
+    const args = [
+      "im", "+messages-reply",
+      "--message-id", messageId,
+      "--msg-type", "interactive",
+      "--content", content,
+    ];
+    if (replyInThread) args.push("--reply-in-thread");
+    args.push("--idempotency-key", key, "--as", "bot", "--format", "json");
+    return this.cli.runRetryable(args);
+  }
+
   private async listDashboardBlocks(dashboardId: string): Promise<unknown[]> {
     const data = await this.cli.runRetryable<unknown>([
       "base", "+dashboard-block-list", "--base-token", this.config.lark.baseToken, "--dashboard-id", dashboardId,

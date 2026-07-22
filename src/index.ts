@@ -2,6 +2,7 @@ import { AgentRunner } from "./agent/runner.js";
 import { loadConfig } from "./config.js";
 import { startHealthServer, type HealthState } from "./health.js";
 import { BaseTools } from "./lark/base-tools.js";
+import { StreamingCardKit } from "./lark/cardkit.js";
 import { LarkCli } from "./lark/cli.js";
 import { EventConsumer } from "./lark/event-consumer.js";
 import { MessageService } from "./service/message-service.js";
@@ -30,8 +31,16 @@ async function main(): Promise<void> {
   const healthServer = startHealthServer(config.health.host, config.health.port, health);
 
   const agent = new AgentRunner(config, baseTools, stateStore);
+  const cards = new StreamingCardKit(cli, baseTools);
   const botIdentity = config.lark.botOpenId || config.lark.botName;
-  const service = new MessageService(botIdentity, stateStore, agent, baseTools);
+  const service = new MessageService(
+    botIdentity,
+    stateStore,
+    agent,
+    baseTools,
+    config.lark.responseMode,
+    cards,
+  );
   const consumer = new EventConsumer(cli);
   let restartDelay = 1_000;
   let shuttingDown = false;

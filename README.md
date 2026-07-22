@@ -8,7 +8,7 @@
 - `lark-cli` 1.0.74+
 - 飞书应用“竞品分析”已开启机器人能力
 - 应用已订阅 `im.message.receive_v1`
-- 应用已开通群聊 @ 消息、`im:message:send_as_bot` 以及目标 Base 读写权限
+- 应用已开通群聊 @ 消息、`im:message:send_as_bot`、`cardkit:card:write` 以及目标 Base 读写权限
 - 机器人已加入目标群，且应用或机器人对目标 Base 有完全访问权限
 - 自定义模型端点支持 OpenAI Responses API 和 function calling
 
@@ -42,7 +42,12 @@ OPENAI_BASE_URL=https://your-provider.example/v1
 OPENAI_API_KEY=...
 OPENAI_MODEL=...
 LARK_EXPECTED_APP_ID=cli_your_competitor_analysis_app
+LARK_RESPONSE_MODE=streaming_card
 ```
+
+`LARK_RESPONSE_MODE` 默认是 `streaming_card`：收到消息后立即发送 Card 2.0，模型通过 Responses SSE 返回的文本会每 250ms 合并更新到同一张卡片。工具调用期间卡片显示看板查询状态；卡片创建或更新失败时自动降级为一条完整文本回复。
+
+设置为 `text` 可启用兼容模式。该模式仍使用 Responses SSE 获取最终结果，但只发送一条普通文本消息。
 
 Node 不会自动读取 `.env`。开发时使用：
 

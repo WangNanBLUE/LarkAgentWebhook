@@ -1,5 +1,7 @@
 import type { AgentRunner } from "../agent/runner.js";
+import type { AppConfig } from "../config.js";
 import type { BaseTools } from "../lark/base-tools.js";
+import type { StreamingCardKit, StreamingCardSession } from "../lark/cardkit.js";
 import type { StateStore } from "../state/store.js";
 import type { MessageEvent } from "../types.js";
 
@@ -28,6 +30,8 @@ export class MessageService {
     private readonly state: StateStore,
     private readonly agent: AgentRunner,
     private readonly tools: BaseTools,
+    private readonly responseMode: AppConfig["lark"]["responseMode"] = "text",
+    private readonly cards?: Pick<StreamingCardKit, "start">,
   ) {}
 
   async handle(event: MessageEvent): Promise<void> {
@@ -63,6 +67,10 @@ export class MessageService {
         return;
       }
 
+      if (this.responseMode === "streaming_card" && this.cards) {
+        await this.handleStreaming(event, prompt, conversationKey);
+        return;
+      }
       const answer = await this.agent.run({ event, prompt, conversationKey });
       await this.reply(event, answer);
     } catch (error) {
@@ -71,8 +79,62 @@ export class MessageService {
     }
   }
 
-  private async reply(event: MessageEvent, content: string): Promise<void> {
-    const replyInThread = false;
+  private async handleStreaming(event: MessageEvent, prompt: string, conversationKey: string): Promise<void> {
+    let session: StreamingCardSession;
+    try {
+      session = await this.cards!.start(event);
+    } catch (error) {
+      this.logStreamingError(event, "start", error);
+      let content: string;
+      try {
+        content = await this.agent.run({ event, prompt, conversationKey });
+      } catch (modelError) {
+        const message = modelError instanceof Error ? modelError.message : String(modelError);
+        content = `处理失败：${message.slice(0, 500)}`;
+        this.logStreamingError(event, "model_after_start_failure", modelError);
+      }
+      await this.reply(event, content, event.chat_type === "group")
+        .catch((replyError) => this.logStreamingError(event, "fallback_reply", replyError));
+      return;
+    }
+
+    try {
+      const answer = await this.agent.run({ event, prompt, conversationKey }, {
+        onTextDelta: (delta) => session.appendText(delta),
+        onToolStart: () => session.setStatus("querying"),
+        onToolEnd: () => session.setStatus("summarizing"),
+      });
+      if (!await session.finish(answer)) {
+        await this.reply(event, answer, event.chat_type === "group")
+          .catch((replyError) => this.logStreamingError(event, "fallback_reply", replyError));
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logStreamingError(event, "model", error);
+      const cardHandled = await session.fail(message).catch((cardError) => {
+        this.logStreamingError(event, "failure_card", cardError);
+        return false;
+      });
+      if (!cardHandled) {
+        await this.reply(event, `处理失败：${message.slice(0, 500)}`, event.chat_type === "group")
+          .catch((replyError) => this.logStreamingError(event, "fallback_reply", replyError));
+      }
+    }
+  }
+
+  private logStreamingError(event: MessageEvent, phase: string, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${JSON.stringify({
+      timestamp: new Date().toISOString(),
+      type: "streaming_card.error",
+      phase,
+      message_id: event.message_id,
+      chat_id: event.chat_id,
+      error: message.slice(0, 500),
+    })}\n`);
+  }
+
+  private async reply(event: MessageEvent, content: string, replyInThread = false): Promise<void> {
     const replyContent = event.chat_type === "group"
       ? `<at user_id="${event.sender_id}"></at> ${content}`
       : content;
