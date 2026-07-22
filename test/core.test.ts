@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { classifyCliError } from "../src/lark/errors.js";
 import { StateStore } from "../src/state/store.js";
 import { MessageService, shouldHandleEvent, writeMessageLog } from "../src/service/message-service.js";
-import { addDashboardDateFilter } from "../src/agent/runner.js";
+import { addDashboardDateFilter, buildAggregateQuery } from "../src/agent/runner.js";
 import { validateDashboardConfig } from "../src/lark/base-tools.js";
 
 const stores: StateStore[] = [];
@@ -166,5 +166,23 @@ describe("dashboard filters", () => {
     expect(() => addDashboardDateFilter({ count_all: true }, "快照日期", "2026-02-30")).toThrow(/YYYY-MM-DD/);
     expect(() => validateDashboardConfig("text", { count_all: true }, true)).toThrow();
     expect(() => validateDashboardConfig("ring", { count_all: true, series: [{ field_name: "阅读量估算", rollup: "SUM" }] }, true)).toThrow();
+  });
+});
+
+describe("aggregate tool input", () => {
+  test("builds valid Base DSL from typed model arguments", () => {
+    expect(buildAggregateQuery({
+      dimensions: [{ field_name: "榜单题材", alias: "genre" }],
+      measures: [{ field_name: "书籍ID", aggregation: "count", alias: "book_count" }],
+      filters: [],
+      filter_conjunction: "and",
+      sort: [{ field_name: "book_count", order: "desc" }],
+      limit: 10,
+    })).toEqual({
+      dimensions: [{ field_name: "榜单题材", alias: "genre" }],
+      measures: [{ field_name: "书籍ID", aggregation: "count", alias: "book_count" }],
+      sort: [{ field_name: "book_count", order: "desc" }],
+      pagination: { limit: 10 },
+    });
   });
 });

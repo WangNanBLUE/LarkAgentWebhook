@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import OpenAI from "openai";
 import type { Responses } from "openai/resources/responses/responses";
+import { z } from "zod";
 import type { AppConfig } from "../config.js";
 import { parseShanghaiDate } from "../date.js";
 import type { ComponentProposal, ComponentType, MessageEvent, PendingAction } from "../types.js";
@@ -13,6 +14,38 @@ interface RunContext {
   event: MessageEvent;
   prompt: string;
   conversationKey: string;
+}
+
+const aggregateArgsSchema = z.object({
+  dimensions: z.array(z.object({ field_name: z.string().min(1), alias: z.string().min(1).nullable() })).max(5),
+  measures: z.array(z.object({
+    field_name: z.string().min(1),
+    aggregation: z.enum(["sum", "avg", "min", "max", "count", "count_all", "distinct_count"]),
+    alias: z.string().min(1),
+  })).max(10),
+  filters: z.array(z.object({
+    field_name: z.string().min(1),
+    operator: z.enum(["is", "isNot", "contains", "doesNotContain", "isEmpty", "isNotEmpty", "isGreater", "isGreaterEqual", "isLess", "isLessEqual"]),
+    value: z.array(z.string()),
+  })).max(10),
+  filter_conjunction: z.enum(["and", "or"]),
+  sort: z.array(z.object({ field_name: z.string().min(1), order: z.enum(["asc", "desc"]) })).max(5),
+  limit: z.number().int().min(1).max(200),
+}).superRefine((value, context) => {
+  if (value.dimensions.length === 0 && value.measures.length === 0) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "dimensions and measures cannot both be empty" });
+  }
+});
+
+export function buildAggregateQuery(raw: unknown): Record<string, unknown> {
+  const parsed = aggregateArgsSchema.parse(raw);
+  return {
+    ...(parsed.dimensions.length ? { dimensions: parsed.dimensions.map((item) => item.alias ? item : { field_name: item.field_name }) } : {}),
+    ...(parsed.measures.length ? { measures: parsed.measures } : {}),
+    ...(parsed.filters.length ? { filters: { type: 1, conjunction: parsed.filter_conjunction, conditions: parsed.filters } } : {}),
+    ...(parsed.sort.length ? { sort: parsed.sort } : {}),
+    pagination: { limit: parsed.limit },
+  };
 }
 
 export class AgentRunner {
@@ -42,22 +75,36 @@ export class AgentRunner {
 
       input.push(...response.output);
       for (const call of calls) {
+        process.stdout.write(`${JSON.stringify({ timestamp: new Date().toISOString(), type: "agent.tool", round: round + 1, name: call.name, status: "started" })}\n`);
         try {
           const result = await this.executeTool(call.name, JSON.parse(call.arguments) as Record<string, unknown>, context);
           input.push({ type: "function_call_output", call_id: call.call_id, output: JSON.stringify(result) });
+          process.stdout.write(`${JSON.stringify({ timestamp: new Date().toISOString(), type: "agent.tool", round: round + 1, name: call.name, status: "completed" })}\n`);
         } catch (error) {
-          input.push({ type: "function_call_output", call_id: call.call_id, output: JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }) });
+          const message = error instanceof Error ? error.message : String(error);
+          input.push({ type: "function_call_output", call_id: call.call_id, output: JSON.stringify({ ok: false, error: message }) });
+          process.stdout.write(`${JSON.stringify({ timestamp: new Date().toISOString(), type: "agent.tool", round: round + 1, name: call.name, status: "failed", error: message.slice(0, 300) })}\n`);
         }
       }
     }
-    throw new Error("Agent tool limit exceeded");
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error("Agent request timed out");
+    const finalResponse = await this.client.responses.create({
+      model: this.config.openai.model,
+      instructions: `${AGENT_INSTRUCTIONS}\n工具调用预算已用完。请只根据已有工具结果给出最终回答；不得再调用工具。若数据不足，明确说明缺少什么。`,
+      input,
+      tools: TOOL_DEFINITIONS,
+      tool_choice: "none",
+      store: false,
+    }, { signal: AbortSignal.timeout(remaining) });
+    return finalResponse.output_text || "已完成查询，但未生成有效总结。";
   }
 
   private async executeTool(name: string, args: Record<string, unknown>, context: RunContext): Promise<unknown> {
     switch (name) {
       case "get_source_schema": return this.tools.getSourceSchema();
       case "resolve_snapshot_date": return this.tools.resolveSnapshotDate(args.requested_date as string | null);
-      case "aggregate_books": return this.tools.dataQuery(JSON.parse(String(args.dsl_json)), String(args.snapshot_date));
+      case "aggregate_books": return this.tools.dataQuery(buildAggregateQuery(args), String(args.snapshot_date));
       case "query_books": return this.tools.searchRecords({
         keyword: String(args.keyword), searchFields: args.search_fields as string[], selectFields: args.select_fields as string[], limit: Number(args.limit), snapshotDate: String(args.snapshot_date),
       });

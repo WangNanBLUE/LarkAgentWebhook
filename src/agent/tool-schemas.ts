@@ -4,6 +4,25 @@ const object = (properties: Record<string, unknown>, required: string[]): Record
   type: "object", properties, required, additionalProperties: false,
 });
 
+const dimension = object({
+  field_name: { type: "string", description: "真实字段名" },
+  alias: { type: ["string", "null"], description: "唯一英文别名；不需要时为 null" },
+}, ["field_name", "alias"]);
+const measure = object({
+  field_name: { type: "string", description: "真实字段名" },
+  aggregation: { type: "string", enum: ["sum", "avg", "min", "max", "count", "count_all", "distinct_count"] },
+  alias: { type: "string", description: "唯一英文别名" },
+}, ["field_name", "aggregation", "alias"]);
+const filter = object({
+  field_name: { type: "string" },
+  operator: { type: "string", enum: ["is", "isNot", "contains", "doesNotContain", "isEmpty", "isNotEmpty", "isGreater", "isGreaterEqual", "isLess", "isLessEqual"] },
+  value: { type: "array", items: { type: "string" }, description: "筛选值；空值操作符传空数组" },
+}, ["field_name", "operator", "value"]);
+const sort = object({
+  field_name: { type: "string", description: "真实字段名或 measure alias" },
+  order: { type: "string", enum: ["asc", "desc"] },
+}, ["field_name", "order"]);
+
 export const TOOL_DEFINITIONS: Responses.FunctionTool[] = [
   {
     type: "function", name: "get_source_schema", description: "读取竞品书籍快照表的真实字段结构。任何数据查询前先调用。",
@@ -14,11 +33,16 @@ export const TOOL_DEFINITIONS: Responses.FunctionTool[] = [
     strict: true, parameters: object({ requested_date: { type: ["string", "null"], description: "用户明确指定的日期，否则为 null" } }, ["requested_date"]),
   },
   {
-    type: "function", name: "aggregate_books", description: "使用 Base data-query DSL 做筛选、分组、聚合、排序和 Top N。datasource、分页上限和输出格式由服务强制覆盖。",
+    type: "function", name: "aggregate_books", description: "对书籍做分组、聚合、筛选、排序和 Top N。参数已结构化，不要生成 DSL JSON。dimensions 和 measures 至少一个非空。",
     strict: true, parameters: object({
-      dsl_json: { type: "string", description: "不含 datasource 和快照日期条件的合法 data-query JSON；alias 只能用英文" },
+      dimensions: { type: "array", items: dimension, maxItems: 5 },
+      measures: { type: "array", items: measure, maxItems: 10 },
+      filters: { type: "array", items: filter, maxItems: 10, description: "额外筛选条件；快照日期由服务自动添加" },
+      filter_conjunction: { type: "string", enum: ["and", "or"] },
+      sort: { type: "array", items: sort, maxItems: 5 },
+      limit: { type: "integer", minimum: 1, maximum: 200 },
       snapshot_date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$", description: "resolve_snapshot_date 返回的 YYYY-MM-DD" },
-    }, ["dsl_json", "snapshot_date"]),
+    }, ["dimensions", "measures", "filters", "filter_conjunction", "sort", "limit", "snapshot_date"]),
   },
   {
     type: "function", name: "query_books", description: "按关键词查询少量具体书籍明细，不用于全局统计。",
