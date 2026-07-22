@@ -88,6 +88,83 @@ describe("agent streaming", () => {
     expect(answer).toBe("分析完成");
     expect(responses.stream).toHaveBeenCalledTimes(2);
   });
+
+  test("falls back to textual tool results when the upstream rejects function outputs", async () => {
+    const call = {
+      type: "function_call",
+      id: "fc_1",
+      call_id: "call_1",
+      name: "get_source_schema",
+      arguments: "{}",
+      status: "completed",
+    };
+    const makeStream = (events: unknown[], response: unknown) => ({
+      async *[Symbol.asyncIterator]() {
+        for (const event of events) yield event;
+      },
+      finalResponse: vi.fn(async () => response),
+    });
+    const upstreamError = Object.assign(new Error("502 Upstream request failed"), { status: 502 });
+    const responses = {
+      stream: vi.fn()
+        .mockReturnValueOnce(makeStream([], { output: [call], output_text: "" }))
+        .mockImplementationOnce(() => { throw upstreamError; })
+        .mockReturnValueOnce(makeStream([
+          { type: "response.output_text.delta", delta: "分析完成" },
+        ], { output: [{ type: "message" }], output_text: "" })),
+    };
+    const tools = { getSourceSchema: vi.fn(async () => ({ fields: [] })) };
+    const runner = new AgentRunner(
+      loadConfig(configEnv),
+      tools as never,
+      {} as never,
+      responses as never,
+    );
+
+    const answer = await runner.run({
+      event: {
+        message_id: "om_compat",
+        chat_id: "oc_1",
+        sender_id: "ou_1",
+        chat_type: "p2p",
+        content: "分析",
+      },
+      prompt: "分析",
+      conversationKey: "om_compat",
+    });
+
+    const compatibilityInput = responses.stream.mock.calls[2]?.[0]?.input as Array<Record<string, unknown>>;
+    expect(answer).toBe("分析完成");
+    expect(tools.getSourceSchema).toHaveBeenCalledTimes(1);
+    expect(responses.stream).toHaveBeenCalledTimes(3);
+    expect(compatibilityInput.some((item) => item.type === "function_call_output")).toBe(false);
+    expect(JSON.stringify(compatibilityInput)).toContain("工具调用记录");
+    expect(JSON.stringify(compatibilityInput)).toContain("fields");
+
+    responses.stream
+      .mockReturnValueOnce(makeStream([], { output: [call], output_text: "" }))
+      .mockReturnValueOnce(makeStream([
+        { type: "response.output_text.delta", delta: "再次完成" },
+      ], { output: [{ type: "message" }], output_text: "" }));
+
+    const secondAnswer = await runner.run({
+      event: {
+        message_id: "om_compat_2",
+        chat_id: "oc_1",
+        sender_id: "ou_1",
+        chat_type: "p2p",
+        content: "再次分析",
+      },
+      prompt: "再次分析",
+      conversationKey: "om_compat_2",
+    });
+    const cachedCompatibilityInput = responses.stream.mock.calls[4]?.[0]?.input as Array<Record<string, unknown>>;
+
+    expect(secondAnswer).toBe("再次完成");
+    expect(responses.stream).toHaveBeenCalledTimes(5);
+    expect(cachedCompatibilityInput.some((item) => item.type === "function_call_output")).toBe(false);
+    expect(JSON.stringify(cachedCompatibilityInput)).toContain("工具调用记录");
+  });
 });
 
 describe("CLI failures", () => {
