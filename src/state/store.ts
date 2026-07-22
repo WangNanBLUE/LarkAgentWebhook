@@ -1,0 +1,113 @@
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import type { PendingAction } from "../types.js";
+
+type ClaimResult = { ok: true; action: PendingAction } | { ok: false; reason: "not_found" | "expired" };
+
+export class StateStore {
+  private readonly db: DatabaseSync;
+
+  constructor(path: string) {
+    if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+    this.db = new DatabaseSync(path);
+    this.db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;");
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS processed_messages (
+        message_id TEXT PRIMARY KEY,
+        processed_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS pending_actions (
+        id TEXT PRIMARY KEY,
+        requester_id TEXT NOT NULL,
+        chat_id TEXT NOT NULL,
+        root_message_id TEXT NOT NULL,
+        thread_id TEXT,
+        expires_at INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
+      );
+      CREATE INDEX IF NOT EXISTS pending_lookup ON pending_actions(requester_id, chat_id, thread_id, status, created_at);
+      CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS managed_components (
+        block_id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL,
+        config_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+  }
+
+  markMessageProcessed(messageId: string, now = Date.now()): boolean {
+    const result = this.db.prepare("INSERT OR IGNORE INTO processed_messages(message_id, processed_at) VALUES (?, ?)").run(messageId, now);
+    return result.changes === 1;
+  }
+
+  createPendingAction(action: PendingAction): void {
+    this.db.prepare(`
+      INSERT INTO pending_actions(id, requester_id, chat_id, root_message_id, thread_id, expires_at, kind, payload_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(action.id, action.requesterId, action.chatId, action.rootMessageId, action.threadId ?? null, action.expiresAt, action.kind, JSON.stringify(action.payload));
+  }
+
+  claimPendingAction(requesterId: string, chatId: string, threadId: string | undefined, now = Date.now()): ClaimResult {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare(`
+        SELECT * FROM pending_actions
+        WHERE requester_id = ? AND chat_id = ? AND thread_id IS ? AND status = 'pending'
+        ORDER BY created_at DESC LIMIT 1
+      `).get(requesterId, chatId, threadId ?? null) as Record<string, unknown> | undefined;
+      if (!row) {
+        this.db.exec("COMMIT");
+        return { ok: false, reason: "not_found" };
+      }
+      if (Number(row.expires_at) < now) {
+        this.db.prepare("UPDATE pending_actions SET status = 'expired' WHERE id = ?").run(String(row.id));
+        this.db.exec("COMMIT");
+        return { ok: false, reason: "expired" };
+      }
+      this.db.prepare("UPDATE pending_actions SET status = 'claimed' WHERE id = ? AND status = 'pending'").run(String(row.id));
+      this.db.exec("COMMIT");
+      return {
+        ok: true,
+        action: {
+          id: String(row.id), requesterId: String(row.requester_id), chatId: String(row.chat_id),
+          rootMessageId: String(row.root_message_id), threadId: row.thread_id ? String(row.thread_id) : undefined,
+          expiresAt: Number(row.expires_at), kind: String(row.kind) as PendingAction["kind"], payload: JSON.parse(String(row.payload_json)),
+        },
+      };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  getSetting(key: string): string | undefined {
+    const row = this.db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as { value: string } | undefined;
+    return row?.value;
+  }
+
+  setSetting(key: string, value: string): void {
+    this.db.prepare("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key, value);
+  }
+
+  registerComponent(blockId: string, name: string, type: string, config: unknown): void {
+    this.db.prepare(`INSERT INTO managed_components(block_id,name,type,config_json,updated_at) VALUES(?,?,?,?,?)
+      ON CONFLICT(block_id) DO UPDATE SET name=excluded.name,type=excluded.type,config_json=excluded.config_json,updated_at=excluded.updated_at`)
+      .run(blockId, name, type, JSON.stringify(config), Date.now());
+  }
+
+  isManagedComponent(blockId: string): boolean {
+    return Boolean(this.db.prepare("SELECT 1 FROM managed_components WHERE block_id = ?").get(blockId));
+  }
+
+  listManagedComponents(): unknown[] {
+    return this.db.prepare("SELECT block_id, name, type, config_json, updated_at FROM managed_components ORDER BY updated_at DESC").all();
+  }
+
+  close(): void { this.db.close(); }
+}
