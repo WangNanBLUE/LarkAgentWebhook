@@ -229,10 +229,13 @@ export class BaseTools {
     return dashboardId;
   }
 
-  reply(messageId: string, text: string): Promise<unknown> {
+  reply(messageId: string, text: string, replyInThread: boolean): Promise<unknown> {
     const body = text.slice(0, 20_000);
-    const key = createHash("sha256").update(`${messageId}:${body}`).digest("hex").slice(0, 48);
-    return this.cli.runRetryable(["im", "+messages-reply", "--message-id", messageId, "--text", body, "--reply-in-thread", "--idempotency-key", key, "--as", "bot", "--format", "json"]);
+    const key = createHash("sha256").update(`${replyInThread ? "thread" : "main"}:${messageId}:${body}`).digest("hex").slice(0, 48);
+    const args = ["im", "+messages-reply", "--message-id", messageId, "--text", body];
+    if (replyInThread) args.push("--reply-in-thread");
+    args.push("--idempotency-key", key, "--as", "bot", "--format", "json");
+    return this.cli.runRetryable(args);
   }
 
   private async listDashboardBlocks(dashboardId: string): Promise<unknown[]> {

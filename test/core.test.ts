@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { classifyCliError } from "../src/lark/errors.js";
 import { StateStore } from "../src/state/store.js";
-import { shouldHandleEvent, writeMessageLog } from "../src/service/message-service.js";
+import { MessageService, shouldHandleEvent, writeMessageLog } from "../src/service/message-service.js";
 import { addDashboardDateFilter } from "../src/agent/runner.js";
 import { validateDashboardConfig } from "../src/lark/base-tools.js";
 
@@ -50,6 +50,25 @@ describe("message routing", () => {
       expect.objectContaining({ type: "message.received", message_id: "om_1", content: "分析来源分布" }),
       expect.objectContaining({ type: "message.sent", reply_to_message_id: "om_1", content: "已完成分析" }),
     ]);
+  });
+
+  test("replies to direct messages in the main chat stream", async () => {
+    const event = {
+      message_id: "om_dm",
+      chat_id: "oc_dm",
+      sender_id: "ou_user",
+      chat_type: "p2p" as const,
+      content: "你好",
+    };
+    const state = { markMessageProcessed: vi.fn(() => true) };
+    const agent = { run: vi.fn(async () => "你好，有什么可以帮你？") };
+    const tools = { reply: vi.fn(async () => ({})) };
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    await new MessageService("ou_bot", state as never, agent as never, tools as never).handle(event);
+    write.mockRestore();
+
+    expect(tools.reply).toHaveBeenCalledWith("om_dm", "你好，有什么可以帮你？", false);
   });
 });
 
