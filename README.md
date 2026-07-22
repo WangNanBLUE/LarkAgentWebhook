@@ -78,6 +78,12 @@ pm2 start ecosystem.config.cjs
 pm2 save
 ```
 
+服务的 stdout 和 stderr 合并写入 `data/agent.log`。查看实时日志：
+
+```bash
+tail -f data/agent.log
+```
+
 ## 群内用法
 
 ```text
