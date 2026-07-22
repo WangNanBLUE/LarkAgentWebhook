@@ -14,6 +14,13 @@ export function stripBotMention(event: MessageEvent, botIdentity: string): strin
     : event.content.trim();
 }
 
+export function writeMessageLog(
+  type: "message.received" | "message.sent",
+  fields: Record<string, unknown>,
+): void {
+  process.stdout.write(`${JSON.stringify({ timestamp: new Date().toISOString(), type, ...fields })}\n`);
+}
+
 export class MessageService {
   constructor(
     private readonly botIdentity: string,
@@ -23,6 +30,13 @@ export class MessageService {
   ) {}
 
   async handle(event: MessageEvent): Promise<void> {
+    writeMessageLog("message.received", {
+      message_id: event.message_id,
+      chat_id: event.chat_id,
+      sender_id: event.sender_id,
+      chat_type: event.chat_type,
+      content: event.content,
+    });
     if (!shouldHandleEvent(event, this.botIdentity)) return;
     if (!this.state.markMessageProcessed(event.message_id)) return;
 
@@ -33,26 +47,35 @@ export class MessageService {
         const claimed = this.state.claimPendingAction(event.sender_id, event.chat_id, conversationKey);
         if (!claimed.ok) {
           const text = claimed.reason === "expired" ? "该变更预览已过期，请重新发起。" : "未找到由你发起、等待确认的变更。";
-          await this.tools.reply(event.message_id, text);
+          await this.reply(event, text);
           return;
         }
         try {
           const result = await this.tools.executeProposal(claimed.action.payload as never, claimed.action.id);
           this.state.markActionCompleted(claimed.action.id, result);
-          await this.tools.reply(event.message_id, `变更已执行：\n${JSON.stringify(result, null, 2)}`);
+          await this.reply(event, `变更已执行：\n${JSON.stringify(result, null, 2)}`);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           this.state.markActionUnknown(claimed.action.id, message);
-          await this.tools.reply(event.message_id, `变更执行结果未知，系统不会自动重试，以避免重复创建。请检查 AI 分析看板后重新发起。\n原因：${message.slice(0, 300)}`);
+          await this.reply(event, `变更执行结果未知，系统不会自动重试，以避免重复创建。请检查 AI 分析看板后重新发起。\n原因：${message.slice(0, 300)}`);
         }
         return;
       }
 
       const answer = await this.agent.run({ event, prompt, conversationKey });
-      await this.tools.reply(event.message_id, answer);
+      await this.reply(event, answer);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      await this.tools.reply(event.message_id, `处理失败：${message.slice(0, 500)}`).catch(() => undefined);
+      await this.reply(event, `处理失败：${message.slice(0, 500)}`).catch(() => undefined);
     }
+  }
+
+  private async reply(event: MessageEvent, content: string): Promise<void> {
+    await this.tools.reply(event.message_id, content);
+    writeMessageLog("message.sent", {
+      reply_to_message_id: event.message_id,
+      chat_id: event.chat_id,
+      content,
+    });
   }
 }

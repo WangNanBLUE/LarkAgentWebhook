@@ -1,7 +1,7 @@
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { classifyCliError } from "../src/lark/errors.js";
 import { StateStore } from "../src/state/store.js";
-import { shouldHandleEvent } from "../src/service/message-service.js";
+import { shouldHandleEvent, writeMessageLog } from "../src/service/message-service.js";
 import { addDashboardDateFilter } from "../src/agent/runner.js";
 import { validateDashboardConfig } from "../src/lark/base-tools.js";
 
@@ -32,6 +32,23 @@ describe("message routing", () => {
     expect(shouldHandleEvent(base, "ou_bot")).toBe(true);
     expect(shouldHandleEvent({ ...base, chat_type: "p2p" }, "ou_bot")).toBe(false);
     expect(shouldHandleEvent(base, "ou_other_bot")).toBe(false);
+  });
+
+  test("writes received and sent message content as structured JSON", () => {
+    const output: string[] = [];
+    const write = vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+      output.push(String(chunk));
+      return true;
+    });
+
+    writeMessageLog("message.received", { message_id: "om_1", content: "分析来源分布" });
+    writeMessageLog("message.sent", { reply_to_message_id: "om_1", content: "已完成分析" });
+    write.mockRestore();
+
+    expect(output.map((line) => JSON.parse(line))).toEqual([
+      expect.objectContaining({ type: "message.received", message_id: "om_1", content: "分析来源分布" }),
+      expect.objectContaining({ type: "message.sent", reply_to_message_id: "om_1", content: "已完成分析" }),
+    ]);
   });
 });
 
