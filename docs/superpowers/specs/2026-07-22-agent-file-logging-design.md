@@ -28,5 +28,5 @@ Completion requires all of the following:
 2. PM2 reports `feishu-competitor-analysis` as online.
 3. `http://127.0.0.1:8787/healthz` returns HTTP 200 with status `ok`.
 4. `data/agent.log` exists and receives a fresh startup log entry.
-5. The running Node process stdout and stderr point to `data/agent.log`, not a terminal.
+5. PM2 reports both application log paths as `data/agent.log`, and the running Node process is not attached to a terminal.
 6. `data/agent.log` remains ignored by Git.
