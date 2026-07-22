@@ -27,6 +27,9 @@ export class StateStore {
         kind TEXT NOT NULL,
         payload_json TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'pending',
+        result_json TEXT,
+        error_message TEXT,
+        reconciliation_json TEXT,
         created_at INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
       );
       CREATE INDEX IF NOT EXISTS pending_lookup ON pending_actions(requester_id, chat_id, thread_id, status, created_at);
@@ -39,6 +42,9 @@ export class StateStore {
         updated_at INTEGER NOT NULL
       );
     `);
+    this.ensureColumn("pending_actions", "result_json", "TEXT");
+    this.ensureColumn("pending_actions", "error_message", "TEXT");
+    this.ensureColumn("pending_actions", "reconciliation_json", "TEXT");
   }
 
   markMessageProcessed(messageId: string, now = Date.now()): boolean {
@@ -70,7 +76,7 @@ export class StateStore {
         this.db.exec("COMMIT");
         return { ok: false, reason: "expired" };
       }
-      this.db.prepare("UPDATE pending_actions SET status = 'claimed' WHERE id = ? AND status = 'pending'").run(String(row.id));
+      this.db.prepare("UPDATE pending_actions SET status = 'executing' WHERE id = ? AND status = 'pending'").run(String(row.id));
       this.db.exec("COMMIT");
       return {
         ok: true,
@@ -84,6 +90,33 @@ export class StateStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  markActionCompleted(id: string, result: unknown): void {
+    this.db.prepare("UPDATE pending_actions SET status = 'completed', result_json = ?, error_message = NULL WHERE id = ? AND status = 'executing'")
+      .run(JSON.stringify(result), id);
+  }
+
+  markActionUnknown(id: string, message: string): void {
+    this.db.prepare("UPDATE pending_actions SET status = 'unknown', error_message = ? WHERE id = ? AND status = 'executing'")
+      .run(message.slice(0, 1000), id);
+  }
+
+  setActionReconciliation(id: string, value: unknown): void {
+    this.db.prepare("UPDATE pending_actions SET reconciliation_json = ? WHERE id = ? AND status = 'executing'").run(JSON.stringify(value), id);
+  }
+
+  listExecutingActions(): Array<{ action: PendingAction; reconciliation?: unknown }> {
+    const rows = this.db.prepare("SELECT * FROM pending_actions WHERE status = 'executing' ORDER BY created_at").all() as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      action: toPendingAction(row),
+      reconciliation: row.reconciliation_json ? JSON.parse(String(row.reconciliation_json)) : undefined,
+    }));
+  }
+
+  getPendingActionStatus(id: string): string | undefined {
+    const row = this.db.prepare("SELECT status FROM pending_actions WHERE id = ?").get(id) as { status: string } | undefined;
+    return row?.status;
   }
 
   getSetting(key: string): string | undefined {
@@ -105,9 +138,28 @@ export class StateStore {
     return Boolean(this.db.prepare("SELECT 1 FROM managed_components WHERE block_id = ?").get(blockId));
   }
 
+  getManagedComponentRecord(blockId: string): { blockId: string; name: string; type: string; config: Record<string, unknown> } | undefined {
+    const row = this.db.prepare("SELECT block_id, name, type, config_json FROM managed_components WHERE block_id = ?").get(blockId) as Record<string, unknown> | undefined;
+    if (!row) return undefined;
+    return { blockId: String(row.block_id), name: String(row.name), type: String(row.type), config: JSON.parse(String(row.config_json)) as Record<string, unknown> };
+  }
+
   listManagedComponents(): unknown[] {
     return this.db.prepare("SELECT block_id, name, type, config_json, updated_at FROM managed_components ORDER BY updated_at DESC").all();
   }
 
   close(): void { this.db.close(); }
+
+  private ensureColumn(table: string, column: string, definition: string): void {
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!columns.some((item) => item.name === column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
+
+function toPendingAction(row: Record<string, unknown>): PendingAction {
+  return {
+    id: String(row.id), requesterId: String(row.requester_id), chatId: String(row.chat_id),
+    rootMessageId: String(row.root_message_id), threadId: row.thread_id ? String(row.thread_id) : undefined,
+    expiresAt: Number(row.expires_at), kind: String(row.kind) as PendingAction["kind"], payload: JSON.parse(String(row.payload_json)),
+  };
 }

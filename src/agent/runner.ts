@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import OpenAI from "openai";
 import type { Responses } from "openai/resources/responses/responses";
 import type { AppConfig } from "../config.js";
+import { parseShanghaiDate } from "../date.js";
 import type { ComponentProposal, ComponentType, MessageEvent, PendingAction } from "../types.js";
 import { StateStore } from "../state/store.js";
 import { BaseTools } from "../lark/base-tools.js";
@@ -97,17 +98,16 @@ export class AgentRunner {
   }
 }
 
-function addDashboardDateFilter(config: Record<string, unknown>, snapshotField: string, snapshotDate: string): Record<string, unknown> {
+export function addDashboardDateFilter(config: Record<string, unknown>, snapshotField: string, snapshotDate: string): Record<string, unknown> {
   if ("text" in config) return config;
-  const timestamp = new Date(`${snapshotDate}T00:00:00+08:00`).getTime();
-  if (!Number.isFinite(timestamp)) throw new Error("snapshot_date must use YYYY-MM-DD");
+  const timestamp = parseShanghaiDate(snapshotDate);
   const existing = config.filter && typeof config.filter === "object" ? config.filter as Record<string, unknown> : {};
   const conditions = Array.isArray(existing.conditions) ? existing.conditions : [];
   return {
     ...config,
     filter: {
       conjunction: "and",
-      conditions: [...conditions, { field_name: snapshotField, operator: "is", value: ["ExactDate", String(timestamp)] }],
+      conditions: [...conditions, { field_name: snapshotField, operator: "is", value: timestamp }],
     },
   };
 }

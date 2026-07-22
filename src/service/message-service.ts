@@ -36,8 +36,15 @@ export class MessageService {
           await this.tools.reply(event.message_id, text);
           return;
         }
-        const result = await this.tools.executeProposal(claimed.action.payload as never);
-        await this.tools.reply(event.message_id, `变更已执行：\n${JSON.stringify(result, null, 2)}`);
+        try {
+          const result = await this.tools.executeProposal(claimed.action.payload as never, claimed.action.id);
+          this.state.markActionCompleted(claimed.action.id, result);
+          await this.tools.reply(event.message_id, `变更已执行：\n${JSON.stringify(result, null, 2)}`);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.state.markActionUnknown(claimed.action.id, message);
+          await this.tools.reply(event.message_id, `变更执行结果未知，系统不会自动重试，以避免重复创建。请检查 AI 分析看板后重新发起。\n原因：${message.slice(0, 300)}`);
+        }
         return;
       }
 

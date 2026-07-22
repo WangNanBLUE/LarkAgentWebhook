@@ -20,18 +20,19 @@ async function main(): Promise<void> {
     modelConfigured: true,
   };
   const whoami = JSON.parse(await cli.runText(["whoami"])) as { identity?: string; appId?: string; available?: boolean };
-  if (whoami.identity !== "bot" || whoami.available !== true) {
+  if (whoami.identity !== "bot" || whoami.available !== true || whoami.appId !== config.lark.expectedAppId) {
     throw new Error("lark-cli must use the 竞品分析 profile with strict-mode bot");
   }
   await baseTools.getSourceSchema();
   await baseTools.ensureDashboard();
+  await baseTools.reconcileExecutingActions();
   health.feishuReady = true;
   const healthServer = startHealthServer(config.health.host, config.health.port, health);
 
   const agent = new AgentRunner(config, baseTools, stateStore);
   const botIdentity = config.lark.botOpenId || config.lark.botName;
   const service = new MessageService(botIdentity, stateStore, agent, baseTools);
-  let consumer = new EventConsumer(cli);
+  const consumer = new EventConsumer(cli);
   let restartDelay = 1_000;
   let shuttingDown = false;
 
@@ -41,10 +42,7 @@ async function main(): Promise<void> {
         health.eventReady = false;
         health.degradedReason = error?.message;
         if (shuttingDown) return;
-        setTimeout(() => {
-          consumer = new EventConsumer(cli);
-          void startConsumer();
-        }, restartDelay);
+        setTimeout(() => void startConsumer(), restartDelay);
         restartDelay = Math.min(restartDelay * 2, 30_000);
       });
       health.eventReady = true;
@@ -59,19 +57,21 @@ async function main(): Promise<void> {
     }
   };
 
-  const shutdown = (): void => {
+  const shutdown = async (): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
     health.eventReady = false;
     consumer.stop();
-    healthServer.close(() => {
-      stateStore.close();
-      process.exit(0);
-    });
-    setTimeout(() => process.exit(1), 5_000).unref();
+    const hardExit = setTimeout(() => process.exit(1), 5_000);
+    hardExit.unref();
+    await consumer.drain(4_000);
+    await new Promise<void>((resolve) => healthServer.close(() => resolve()));
+    stateStore.close();
+    clearTimeout(hardExit);
+    process.exit(0);
   };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", () => void shutdown());
   await startConsumer();
 }
 

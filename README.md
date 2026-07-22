@@ -41,6 +41,7 @@ cp .env.example .env
 OPENAI_BASE_URL=https://your-provider.example/v1
 OPENAI_API_KEY=...
 OPENAI_MODEL=...
+LARK_EXPECTED_APP_ID=cli_your_competitor_analysis_app
 ```
 
 Node 不会自动读取 `.env`。开发时使用：

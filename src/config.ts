@@ -5,6 +5,7 @@ const envSchema = z.object({
   OPENAI_API_KEY: z.string().min(1),
   OPENAI_MODEL: z.string().min(1),
   LARK_CLI_BINARY: z.string().default("lark-cli"),
+  LARK_EXPECTED_APP_ID: z.string().min(1),
   LARK_BOT_NAME: z.string().default("竞品分析"),
   LARK_BOT_OPEN_ID: z.string().optional(),
   LARK_BASE_TOKEN: z.string().default("MRWSbBwxMafAqRsAZsecYy9Mn5e"),
@@ -25,6 +26,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     openai: { baseURL: value.OPENAI_BASE_URL, apiKey: value.OPENAI_API_KEY, model: value.OPENAI_MODEL },
     lark: {
       binary: value.LARK_CLI_BINARY,
+      expectedAppId: value.LARK_EXPECTED_APP_ID,
       botName: value.LARK_BOT_NAME,
       botOpenId: value.LARK_BOT_OPEN_ID,
       baseToken: value.LARK_BASE_TOKEN,

@@ -17,7 +17,7 @@ export const TOOL_DEFINITIONS: Responses.FunctionTool[] = [
     type: "function", name: "aggregate_books", description: "使用 Base data-query DSL 做筛选、分组、聚合、排序和 Top N。datasource、分页上限和输出格式由服务强制覆盖。",
     strict: true, parameters: object({
       dsl_json: { type: "string", description: "不含 datasource 和快照日期条件的合法 data-query JSON；alias 只能用英文" },
-      snapshot_date: { type: "string", description: "resolve_snapshot_date 返回的 YYYY-MM-DD" },
+      snapshot_date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$", description: "resolve_snapshot_date 返回的 YYYY-MM-DD" },
     }, ["dsl_json", "snapshot_date"]),
   },
   {
@@ -27,7 +27,7 @@ export const TOOL_DEFINITIONS: Responses.FunctionTool[] = [
       search_fields: { type: "array", items: { type: "string" } },
       select_fields: { type: "array", items: { type: "string" } },
       limit: { type: "integer", minimum: 1, maximum: 50 },
-      snapshot_date: { type: "string" },
+      snapshot_date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
     }, ["keyword", "search_fields", "select_fields", "limit", "snapshot_date"]),
   },
   {
@@ -44,7 +44,7 @@ export const TOOL_DEFINITIONS: Responses.FunctionTool[] = [
       name: { type: "string" },
       component_type: { type: "string", enum: ["statistics", "column", "line", "pie", "ring", "text"] },
       data_config_json: { type: "string", description: "符合 lark-base dashboard data_config 规范的 JSON" },
-      snapshot_date: { type: "string" },
+      snapshot_date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
     }, ["name", "component_type", "data_config_json", "snapshot_date"]),
   },
   {
@@ -53,7 +53,7 @@ export const TOOL_DEFINITIONS: Responses.FunctionTool[] = [
       block_id: { type: "string" },
       name: { type: ["string", "null"] },
       data_config_json: { type: ["string", "null"] },
-      snapshot_date: { type: "string" },
+      snapshot_date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
     }, ["block_id", "name", "data_config_json", "snapshot_date"]),
   },
 ];

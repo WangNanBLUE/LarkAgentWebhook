@@ -43,9 +43,27 @@ export class LarkCli {
     }
   }
 
+  async runRetryable<T>(args: string[], attempts = 3): Promise<T> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        return await this.run<T>(args);
+      } catch (error) {
+        lastError = error;
+        if (!(error instanceof LarkCliError) || !error.retryable || attempt === attempts) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 150 * 2 ** (attempt - 1) + Math.floor(Math.random() * 100)));
+      }
+    }
+    throw lastError;
+  }
+
   async runText(args: string[], timeoutMs = 30_000): Promise<string> {
     try {
-      const { stdout } = await execFileAsync(this.binary, args, { timeout: timeoutMs, maxBuffer: 1024 * 1024 });
+      const { stdout } = await execFileAsync(this.binary, args, {
+        timeout: timeoutMs,
+        maxBuffer: 1024 * 1024,
+        env: { ...process.env, LARKSUITE_CLI_NO_UPDATE_NOTIFIER: "1", LARKSUITE_CLI_NO_SKILLS_NOTIFIER: "1" },
+      });
       return stdout.trim();
     } catch (error) {
       const candidate = error as { stderr?: string; message?: string };

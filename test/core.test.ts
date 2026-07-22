@@ -2,6 +2,8 @@ import { afterEach, describe, expect, test } from "vitest";
 import { classifyCliError } from "../src/lark/errors.js";
 import { StateStore } from "../src/state/store.js";
 import { shouldHandleEvent } from "../src/service/message-service.js";
+import { addDashboardDateFilter } from "../src/agent/runner.js";
+import { validateDashboardConfig } from "../src/lark/base-tools.js";
 
 const stores: StateStore[] = [];
 
@@ -73,5 +75,35 @@ describe("state", () => {
       payload: { name: "来源分布 2" },
     });
     expect(store.claimPendingAction("ou_owner", "oc_1", "omt_1", 1001)).toEqual({ ok: false, reason: "expired" });
+  });
+
+  test("records an unknown external write outcome", () => {
+    const store = new StateStore(":memory:");
+    stores.push(store);
+    store.createPendingAction({
+      id: "pa_unknown", requesterId: "ou_owner", chatId: "oc_1", rootMessageId: "om_1",
+      threadId: "om_1", expiresAt: 2000, kind: "component.create", payload: { name: "来源分布" },
+    });
+    expect(store.claimPendingAction("ou_owner", "oc_1", "om_1", 1500).ok).toBe(true);
+    store.markActionUnknown("pa_unknown", "network timeout");
+    expect(store.getPendingActionStatus("pa_unknown")).toBe("unknown");
+  });
+});
+
+describe("dashboard filters", () => {
+  test("uses numeric milliseconds for dashboard datetime filters", () => {
+    const result = addDashboardDateFilter({ count_all: true }, "快照日期", "2026-07-22");
+    const filter = result.filter as { conditions: Array<{ value: unknown }> };
+    expect(filter.conditions[0]?.value).toBe(1784649600000);
+  });
+
+  test("does not add datasource fields to text components", () => {
+    expect(addDashboardDateFilter({ text: "# 结论" }, "快照日期", "2026-07-22")).toEqual({ text: "# 结论" });
+  });
+
+  test("rejects invalid snapshot dates and mismatched component configs", () => {
+    expect(() => addDashboardDateFilter({ count_all: true }, "快照日期", "2026-02-30")).toThrow(/YYYY-MM-DD/);
+    expect(() => validateDashboardConfig("text", { count_all: true }, true)).toThrow();
+    expect(() => validateDashboardConfig("ring", { count_all: true, series: [{ field_name: "阅读量估算", rollup: "SUM" }] }, true)).toThrow();
   });
 });
