@@ -37,6 +37,17 @@ interface ToolTranscriptEntry {
   output: string;
 }
 
+const READ_ONLY_TOOLS = new Set([
+  "inspect_document",
+  "read_document",
+  "inspect_sheet",
+  "read_sheet",
+  "inspect_base",
+  "query_base",
+  "list_base_dashboards",
+  "get_dashboard_component",
+]);
+
 const aggregateArgsSchema = z.object({
   dimensions: z.array(z.object({ field_name: z.string().min(1), alias: z.string().min(1).nullable() })).max(5),
   measures: z.array(z.object({
@@ -241,7 +252,7 @@ export class AgentRunner {
       if (calls.length === 0) return response.output_text || roundText || "未生成有效回答。";
 
       input.push(...response.output);
-      for (const call of calls) {
+      const executeCall = async (call: Responses.ResponseFunctionToolCall): Promise<string> => {
         process.stdout.write(`${JSON.stringify({ timestamp: new Date().toISOString(), type: "agent.tool", round: round + 1, name: call.name, status: "started" })}\n`);
         let output: string;
         try {
@@ -253,9 +264,20 @@ export class AgentRunner {
           output = JSON.stringify({ ok: false, error: message });
           process.stdout.write(`${JSON.stringify({ timestamp: new Date().toISOString(), type: "agent.tool", round: round + 1, name: call.name, status: "failed", error: message.slice(0, 300) })}\n`);
         }
+        return output;
+      };
+      const outputs = calls.every((call) => READ_ONLY_TOOLS.has(call.name))
+        ? await Promise.all(calls.map(executeCall))
+        : await calls.reduce<Promise<string[]>>(async (pending, call) => {
+          const completed = await pending;
+          completed.push(await executeCall(call));
+          return completed;
+        }, Promise.resolve([]));
+      calls.forEach((call, index) => {
+        const output = outputs[index] ?? JSON.stringify({ ok: false, error: "Tool produced no output" });
         input.push({ type: "function_call_output", call_id: call.call_id, output });
         toolTranscript.push({ name: call.name, arguments: call.arguments, output });
-      }
+      });
       observer?.onToolEnd();
     }
     const { response: finalResponse, roundText } = await requestRound(
@@ -344,7 +366,8 @@ export class AgentRunner {
         const base = requireBaseResource(this.baseResource);
         const location = await base.resolve(source);
         const [blocks, tables] = await Promise.all([base.listBlocks(location), base.listTables(location)]);
-        const tableId = args.table_id === null || args.table_id === undefined ? undefined : String(args.table_id);
+        const requestedTableId = args.table_id === null || args.table_id === undefined ? undefined : String(args.table_id);
+        const tableId = requestedTableId ?? location.tableId;
         const fields = tableId ? await base.fields(location, tableId) : undefined;
         return {
           source_id: source.id,
@@ -364,11 +387,7 @@ export class AgentRunner {
           table_id: String(args.table_id),
           dimensions: args.dimensions as never,
           measures: args.measures as never,
-          filters: (args.filters as Array<Record<string, unknown>>).map((filter) => (
-            filter.value === null
-              ? { field_name: String(filter.field_name), operator: filter.operator as never }
-              : filter as never
-          )),
+          filters: args.filters as never,
           filter_conjunction: args.filter_conjunction as "and" | "or",
           sort: args.sort as never,
           limit: Number(args.limit),

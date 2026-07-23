@@ -226,4 +226,41 @@ describe("Base resource reader", () => {
     }, new SourceBudget())).rejects.toThrow("fields");
     expect(cli.runRetryable).toHaveBeenCalledTimes(1);
   });
+
+  test("normalizes empty filters to the explicit empty value required by Base", async () => {
+    const cli = {
+      runRetryable: vi.fn()
+        .mockResolvedValueOnce({ fields: [{ field_name: "作者" }] })
+        .mockResolvedValueOnce({ rows: [], has_more: false }),
+    };
+    const source = SourceRegistry.fromPrompt(
+      "https://a.feishu.cn/base/bas_1?table=tbl_1",
+      { idFactory: () => "src_base" },
+    ).require("src_base");
+    const resource = new BaseResource(cli as never);
+    const location = { sourceId: "src_base", baseToken: "bas_1", tableId: "tbl_1" };
+    await resource.fields(location, "tbl_1");
+
+    await resource.query(location, source, {
+      table_id: "tbl_1",
+      dimensions: [],
+      measures: [{ field_name: "作者", aggregation: "count", alias: "authors" }],
+      filters: [
+        { field_name: "作者", operator: "isNotEmpty", value: null },
+        { field_name: "作者", operator: "isEmpty", value: [] },
+      ],
+      filter_conjunction: "or",
+      sort: [],
+      limit: 20,
+    } as never, new SourceBudget());
+
+    const queryArgs = cli.runRetryable.mock.calls[1]?.[0] as string[];
+    const dsl = JSON.parse(queryArgs[queryArgs.indexOf("--dsl") + 1] ?? "{}") as {
+      filters?: { conditions?: Array<Record<string, unknown>> };
+    };
+    expect(dsl.filters?.conditions).toEqual([
+      { field_name: "作者", operator: "isNotEmpty", value: [] },
+      { field_name: "作者", operator: "isEmpty", value: [] },
+    ]);
+  });
 });

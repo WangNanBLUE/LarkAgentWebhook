@@ -26,10 +26,6 @@ const dataConfig = { type: "object", additionalProperties: true };
 
 export const TOOL_DEFINITIONS: Responses.FunctionTool[] = [
   {
-    type: "function", name: "list_input_sources", description: "列出用户本轮明确提供、可供分析的文本或飞书资源。只返回 source_id、类型和标题。",
-    strict: true, parameters: object({}, []),
-  },
-  {
     type: "function", name: "inspect_document", description: "读取 Docx/Wiki 文档目录。只接受本轮 source_id，不接受链接或 token。",
     strict: true, parameters: object({
       source_id: { type: "string", pattern: "^src_[A-Za-z0-9-]+$" },

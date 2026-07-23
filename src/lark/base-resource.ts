@@ -16,7 +16,7 @@ const measureSchema = z.object({
 const filterSchema = z.object({
   field_name: z.string().min(1),
   operator: z.enum(["is", "isNot", "contains", "doesNotContain", "isEmpty", "isNotEmpty", "isGreater", "isGreaterEqual", "isLess", "isLessEqual"]),
-  value: z.union([z.string(), z.number(), z.boolean(), z.array(z.string())]).optional(),
+  value: z.union([z.string(), z.number(), z.boolean(), z.array(z.string()), z.null()]).optional(),
 }).strict();
 const querySchema = z.object({
   table_id: z.string().min(1),
@@ -35,10 +35,10 @@ const querySchema = z.object({
   }
   value.filters.forEach((filter, index) => {
     const emptyOperator = filter.operator === "isEmpty" || filter.operator === "isNotEmpty";
-    if (emptyOperator && filter.value !== undefined) {
-      context.addIssue({ code: z.ZodIssueCode.custom, path: ["filters", index, "value"], message: "empty operators must omit value" });
+    if (emptyOperator && filter.value !== null && !(Array.isArray(filter.value) && filter.value.length === 0)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["filters", index, "value"], message: "empty operators require null or an empty array" });
     }
-    if (!emptyOperator && filter.value === undefined) {
+    if (!emptyOperator && (filter.value === undefined || filter.value === null)) {
       context.addIssue({ code: z.ZodIssueCode.custom, path: ["filters", index, "value"], message: "filter requires value" });
     }
   });
@@ -137,11 +137,10 @@ export class BaseResource {
         filters: {
           type: 1,
           conjunction: input.filter_conjunction,
-          conditions: input.filters.map((filter) => (
-            filter.value === undefined
-              ? { field_name: filter.field_name, operator: filter.operator }
-              : filter
-          )),
+          conditions: input.filters.map((filter) => {
+            const emptyOperator = filter.operator === "isEmpty" || filter.operator === "isNotEmpty";
+            return emptyOperator ? { ...filter, value: [] } : filter;
+          }),
         },
       } : {}),
       ...(input.sort.length ? { sort: input.sort } : {}),

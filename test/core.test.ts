@@ -60,7 +60,6 @@ describe("configuration", () => {
   test("exposes source-bound readers without URL or Base token arguments", () => {
     const names = TOOL_DEFINITIONS.map((tool) => tool.name);
     expect(names).toEqual(expect.arrayContaining([
-      "list_input_sources",
       "inspect_document",
       "read_document",
       "inspect_sheet",
@@ -70,6 +69,7 @@ describe("configuration", () => {
       "list_base_dashboards",
       "get_dashboard_component",
     ]));
+    expect(names).not.toContain("list_input_sources");
     const serialized = JSON.stringify(TOOL_DEFINITIONS);
     expect(serialized).not.toContain("base_token");
     expect(serialized).not.toContain('"url"');
@@ -77,6 +77,96 @@ describe("configuration", () => {
 });
 
 describe("agent streaming", () => {
+  test("inspects the linked default Base table fields in the first call", async () => {
+    const registry = SourceRegistry.fromPrompt(
+      "https://a.feishu.cn/base/bas_1?table=tbl_1",
+      { idFactory: () => "src_base" },
+    );
+    const base = {
+      resolve: vi.fn(async () => ({ sourceId: "src_base", baseToken: "bas_1", tableId: "tbl_1" })),
+      listBlocks: vi.fn(async () => ({ blocks: [] })),
+      listTables: vi.fn(async () => ({ tables: [{ table_id: "tbl_1" }] })),
+      fields: vi.fn(async () => ({ fields: [{ field_name: "书名" }] })),
+    };
+    const runner = new AgentRunner(
+      loadConfig(configEnv), {} as never, {} as never, undefined,
+      undefined, base as never,
+    );
+
+    const result = await (runner as unknown as {
+      executeTool(name: string, args: Record<string, unknown>, context: AgentRunContext): Promise<unknown>;
+    }).executeTool("inspect_base", { source_id: "src_base", table_id: null }, {
+      event: { message_id: "om_base", chat_id: "oc_1", sender_id: "ou_1", chat_type: "p2p", content: "分析" },
+      prompt: "分析",
+      conversationKey: "om_base",
+      sources: registry,
+      budget: new SourceBudget(),
+    });
+
+    expect(base.fields).toHaveBeenCalledWith(expect.objectContaining({ tableId: "tbl_1" }), "tbl_1");
+    expect(result).toMatchObject({ default_table_id: "tbl_1", fields: { fields: [{ field_name: "书名" }] } });
+  });
+
+  test("runs independent read-only tool calls from one model round concurrently", async () => {
+    const registry = SourceRegistry.fromPrompt(
+      "https://a.feishu.cn/sheets/sht_1 https://a.feishu.cn/sheets/sht_2",
+      { idFactory: (() => {
+        const ids = ["src_sheet_1", "src_sheet_2"][Symbol.iterator]();
+        return () => ids.next().value!;
+      })() },
+    );
+    const sourceIds = registry.list().map((source) => source.id);
+    const calls = sourceIds.map((sourceId, index) => ({
+      type: "function_call",
+      id: `fc_${index}`,
+      call_id: `call_${index}`,
+      name: "inspect_sheet",
+      arguments: JSON.stringify({ source_id: sourceId }),
+      status: "completed",
+    }));
+    const makeStream = (response: unknown) => ({
+      async *[Symbol.asyncIterator]() {
+        yield { type: "response.completed", response };
+      },
+      finalResponse: vi.fn(async () => response),
+    });
+    const responses = {
+      stream: vi.fn()
+        .mockReturnValueOnce(makeStream({ output: calls, output_text: "", status: "completed" }))
+        .mockReturnValueOnce(makeStream({
+          output: [{ type: "message" }], output_text: "分析完成", status: "completed",
+        })),
+    };
+    let active = 0;
+    let maxActive = 0;
+    const sourceReader = {
+      inspectSheet: vi.fn(async (source: { id: string }) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        active -= 1;
+        return { source_id: source.id };
+      }),
+    };
+    const runner = new AgentRunner(
+      loadConfig(configEnv), {} as never, {} as never, responses as never,
+      sourceReader as never,
+    );
+
+    await expect(runner.run({
+      event: { message_id: "om_parallel", chat_id: "oc_1", sender_id: "ou_1", chat_type: "p2p", content: "分析" },
+      prompt: "分析",
+      conversationKey: "om_parallel",
+      sources: registry,
+      budget: new SourceBudget(),
+    })).resolves.toBe("分析完成");
+
+    expect(maxActive).toBe(2);
+    const nextRoundInput = responses.stream.mock.calls[1]?.[0]?.input as Array<{ type?: string; call_id?: string }>;
+    expect(nextRoundInput.filter((item) => item.type === "function_call_output").map((item) => item.call_id))
+      .toEqual(["call_0", "call_1"]);
+  });
+
   test("dispatches structured document creation arguments", async () => {
     const call = {
       type: "function_call",
