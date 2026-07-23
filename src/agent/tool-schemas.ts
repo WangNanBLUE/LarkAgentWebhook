@@ -109,4 +109,18 @@ export const TOOL_DEFINITIONS: Responses.FunctionTool[] = [
       snapshot_date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
     }, ["block_id", "name", "data_config_json", "snapshot_date"]),
   },
+  {
+    type: "function", name: "create_document", description: "仅在用户明确要求时，以应用身份新建并由应用拥有竞品分析飞书文档。不搜索或读取其他文档。content_xml 使用合法 Docx XML，且不包含 title 标签。",
+    strict: true, parameters: object({
+      title: { type: "string", minLength: 1, maxLength: 200 },
+      content_xml: { type: "string", minLength: 1, maxLength: 100000 },
+    }, ["title", "content_xml"]),
+  },
+  {
+    type: "function", name: "append_document", description: "仅在用户明确提供文档 URL/token、要求追加且该文档已向应用开放编辑权限时，以应用身份向文档末尾追加竞品分析内容。不读取、覆盖或删除原内容。",
+    strict: true, parameters: object({
+      document: { type: "string", minLength: 1, maxLength: 1000, description: "用户提供的飞书文档 URL 或 token" },
+      content_xml: { type: "string", minLength: 1, maxLength: 100000 },
+    }, ["document", "content_xml"]),
+  },
 ];

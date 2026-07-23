@@ -96,6 +96,16 @@ const chartCreateArgsSchema = z.object({
   }
 });
 
+const documentCreateArgsSchema = z.object({
+  title: z.string().min(1).max(200),
+  content_xml: z.string().min(1).max(100_000),
+}).strict();
+
+const documentAppendArgsSchema = z.object({
+  document: z.string().min(1).max(1_000),
+  content_xml: z.string().min(1).max(100_000),
+}).strict();
+
 export function buildChartComponentConfig(raw: unknown): {
   name: string;
   type: Exclude<ComponentType, "text">;
@@ -240,15 +250,27 @@ export class AgentRunner {
   ): Promise<{ response: Responses.Response; roundText: string }> {
     const stream = this.responses.stream(params, { signal: AbortSignal.timeout(remaining) });
     let roundText = "";
+    let terminalResponse: Responses.Response | undefined;
     for await (const event of stream) {
       if (event.type === "response.output_text.delta") {
         roundText += event.delta;
         observer?.onTextDelta(event.delta, appendDisplayedText(event.delta));
       } else if (event.type === "response.output_item.added" && event.item.type === "function_call") {
         observer?.onToolStart(event.item.name);
+      } else if (
+        event.type === "response.completed"
+        || event.type === "response.incomplete"
+        || event.type === "response.failed"
+      ) {
+        terminalResponse = event.response;
       }
     }
-    return { response: await stream.finalResponse(), roundText };
+    const response = terminalResponse ?? await stream.finalResponse();
+    if (response.status && response.status !== "completed") {
+      const reason = response.incomplete_details?.reason ?? response.error?.message ?? response.status;
+      throw new Error(`Agent response ${response.status}: ${reason}`);
+    }
+    return { response, roundText };
   }
 
   private async executeTool(name: string, args: Record<string, unknown>, context: RunContext): Promise<unknown> {
@@ -261,6 +283,14 @@ export class AgentRunner {
       });
       case "list_managed_components": return this.tools.listManagedComponents();
       case "get_managed_component": return this.tools.getManagedComponent(String(args.block_id));
+      case "create_document": {
+        const parsed = documentCreateArgsSchema.parse(args);
+        return this.tools.createDocument(parsed.title, parsed.content_xml);
+      }
+      case "append_document": {
+        const parsed = documentAppendArgsSchema.parse(args);
+        return this.tools.appendDocument(parsed.document, parsed.content_xml);
+      }
       case "propose_chart_component_create": {
         const chart = buildChartComponentConfig(args);
         const proposal = this.tools.validateProposal({
@@ -287,7 +317,7 @@ export class AgentRunner {
     }
   }
 
-  private saveProposal(proposal: ComponentProposal, context: RunContext): unknown {
+  private async saveProposal(proposal: ComponentProposal, context: RunContext): Promise<unknown> {
     const action: PendingAction = {
       id: `pa_${randomUUID()}`,
       requesterId: context.event.sender_id,
@@ -299,7 +329,14 @@ export class AgentRunner {
       payload: proposal,
     };
     this.state.createPendingAction(action);
-    return { ok: true, proposal_id: action.id, expires_in_minutes: 10, proposal, confirmation: "请在同一会话中 @竞品分析 回复：确认" };
+    let approvalCardSent = true;
+    try { await this.tools.sendApprovalCard(action); }
+    catch { approvalCardSent = false; }
+    return {
+      ok: true, proposal_id: action.id, expires_in_minutes: 10, proposal,
+      approval_card_sent: approvalCardSent,
+      confirmation: approvalCardSent ? "请在审批卡片中点击“确认执行”或“取消”。" : "审批卡片发送失败，请在同一聊天中回复：确认",
+    };
   }
 }
 
@@ -327,12 +364,14 @@ export function addDashboardDateFilter(config: Record<string, unknown>, snapshot
   if ("text" in config) return config;
   const timestamp = parseShanghaiDate(snapshotDate);
   const existing = config.filter && typeof config.filter === "object" ? config.filter as Record<string, unknown> : {};
-  const conditions = Array.isArray(existing.conditions) ? existing.conditions : [];
+  const conditions = Array.isArray(existing.conditions)
+    ? existing.conditions.filter((condition) => !condition || typeof condition !== "object" || (condition as Record<string, unknown>).field_name !== snapshotField)
+    : [];
   return {
     ...config,
     filter: {
       conjunction: "and",
-      conditions: [...conditions, { field_name: snapshotField, operator: "is", value: timestamp }],
+      conditions: [...conditions, { field_name: snapshotField, operator: "is", value: ["ExactDate", timestamp] }],
     },
   };
 }

@@ -17,6 +17,17 @@ export interface MessageEvent {
   mentions?: Mention[];
 }
 
+export interface CardActionEvent {
+  type: "card.action.trigger";
+  event_id: string;
+  operator_id: string;
+  message_id: string;
+  chat_id: string;
+  token: string;
+  action_tag: string;
+  action_value: string;
+}
+
 export interface PendingAction {
   id: string;
   requesterId: string;

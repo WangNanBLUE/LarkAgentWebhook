@@ -3,6 +3,8 @@ import { z } from "zod";
 import type { AppConfig } from "../config.js";
 import { parseShanghaiDate } from "../date.js";
 import type { ComponentProposal, ComponentType } from "../types.js";
+import type { PendingAction } from "../types.js";
+import { buildApprovalCard } from "./approval-card.js";
 import { StateStore } from "../state/store.js";
 import { LarkCli } from "./cli.js";
 
@@ -23,7 +25,10 @@ const updateSchema = z.object({
 const filterConditionSchema = z.object({
   field_name: z.string().min(1),
   operator: z.enum(["is", "isNot", "contains", "doesNotContain", "isGreater", "isGreaterEqual", "isLess", "isLessEqual", "isEmpty", "isNotEmpty"]),
-  value: z.union([z.string(), z.number(), z.boolean(), z.array(z.string())]).optional(),
+  value: z.union([
+    z.string(), z.number(), z.boolean(), z.array(z.string()),
+    z.tuple([z.literal("ExactDate"), z.number()]),
+  ]).optional(),
 }).strict().superRefine((condition, context) => {
   const emptyOperator = condition.operator === "isEmpty" || condition.operator === "isNotEmpty";
   if (emptyOperator && condition.value !== undefined) context.addIssue({ code: z.ZodIssueCode.custom, message: "Empty operators must omit value" });
@@ -229,6 +234,47 @@ export class BaseTools {
     return dashboardId;
   }
 
+  async getMessageContext(messageId: string): Promise<{ content: string; senderName?: string }> {
+    const data = await this.cli.runRetryable<unknown>([
+      "im", "+messages-mget",
+      "--message-ids", messageId,
+      "--no-reactions",
+      "--as", "bot", "--format", "json",
+    ]);
+    const message = findArray(data, "messages").find((item) => (
+      item && typeof item === "object" && (item as Record<string, unknown>).message_id === messageId
+    ));
+    if (!message || typeof (message as Record<string, unknown>).content !== "string") {
+      throw new Error("Referenced message content is unavailable");
+    }
+    const sender = (message as Record<string, unknown>).sender;
+    return {
+      content: (message as Record<string, unknown>).content as string,
+      ...(sender && typeof sender === "object" && typeof (sender as Record<string, unknown>).name === "string"
+        ? { senderName: (sender as Record<string, unknown>).name as string }
+        : {}),
+    };
+  }
+
+  createDocument(title: string, contentXml: string): Promise<unknown> {
+    return this.cli.run([
+      "docs", "+create",
+      "--title", title,
+      "--content", contentXml,
+      "--as", "bot", "--format", "json",
+    ]);
+  }
+
+  appendDocument(document: string, contentXml: string): Promise<unknown> {
+    return this.cli.run([
+      "docs", "+update",
+      "--doc", document,
+      "--command", "append",
+      "--content", contentXml,
+      "--as", "bot", "--format", "json",
+    ]);
+  }
+
   reply(messageId: string, text: string, replyInThread: boolean): Promise<unknown> {
     const body = text.slice(0, 20_000);
     const key = createHash("sha256").update(`${replyInThread ? "thread" : "main"}:${messageId}:${body}`).digest("hex").slice(0, 48);
@@ -271,6 +317,23 @@ export class BaseTools {
       "im", "+messages-send", "--chat-id", chatId,
       "--msg-type", "interactive", "--content", content,
       "--idempotency-key", key, "--as", "bot", "--format", "json",
+    ]);
+  }
+
+  sendApprovalCard(action: PendingAction): Promise<unknown> {
+    const content = JSON.stringify(buildApprovalCard(action, "pending"));
+    const key = createHash("sha256").update(`approval:${action.id}`).digest("hex").slice(0, 48);
+    return this.cli.runRetryable([
+      "im", "+messages-send", "--chat-id", action.chatId,
+      "--msg-type", "interactive", "--content", content,
+      "--idempotency-key", key, "--as", "bot", "--format", "json",
+    ]);
+  }
+
+  updateInteractiveCard(token: string, card: Record<string, unknown>): Promise<unknown> {
+    return this.cli.run([
+      "api", "POST", "/open-apis/interactive/v1/card/update",
+      "--data", JSON.stringify({ token, card }), "--as", "bot", "--format", "json",
     ]);
   }
 

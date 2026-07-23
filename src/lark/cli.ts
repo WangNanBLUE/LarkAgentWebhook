@@ -71,8 +71,8 @@ export class LarkCli {
     }
   }
 
-  spawnEventConsumer(): ChildProcessWithoutNullStreams {
-    return spawn(this.binary, ["event", "consume", "im.message.receive_v1", "--as", "bot"], {
+  spawnEventConsumer(eventKey = "im.message.receive_v1"): ChildProcessWithoutNullStreams {
+    return spawn(this.binary, ["event", "consume", eventKey, "--as", "bot"], {
       stdio: ["pipe", "pipe", "pipe"],
       env: {
         ...process.env,

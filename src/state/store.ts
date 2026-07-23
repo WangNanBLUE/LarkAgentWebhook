@@ -59,14 +59,26 @@ export class StateStore {
     `).run(action.id, action.requesterId, action.chatId, action.rootMessageId, action.threadId ?? null, action.expiresAt, action.kind, JSON.stringify(action.payload));
   }
 
-  claimPendingAction(requesterId: string, chatId: string, threadId: string | undefined, now = Date.now()): ClaimResult {
+  claimPendingAction(requesterId: string, chatId: string, now = Date.now()): ClaimResult {
+    return this.claimPendingWhere("requester_id = ? AND chat_id = ?", [requesterId, chatId], now, "executing");
+  }
+
+  claimPendingActionById(id: string, requesterId: string, chatId: string, now = Date.now()): ClaimResult {
+    return this.claimPendingWhere("id = ? AND requester_id = ? AND chat_id = ?", [id, requesterId, chatId], now, "executing");
+  }
+
+  cancelPendingActionById(id: string, requesterId: string, chatId: string, now = Date.now()): ClaimResult {
+    return this.claimPendingWhere("id = ? AND requester_id = ? AND chat_id = ?", [id, requesterId, chatId], now, "cancelled");
+  }
+
+  private claimPendingWhere(where: string, params: string[], now: number, nextStatus: "executing" | "cancelled"): ClaimResult {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const row = this.db.prepare(`
         SELECT * FROM pending_actions
-        WHERE requester_id = ? AND chat_id = ? AND thread_id IS ? AND status = 'pending'
+        WHERE ${where} AND status = 'pending'
         ORDER BY created_at DESC LIMIT 1
-      `).get(requesterId, chatId, threadId ?? null) as Record<string, unknown> | undefined;
+      `).get(...params) as Record<string, unknown> | undefined;
       if (!row) {
         this.db.exec("COMMIT");
         return { ok: false, reason: "not_found" };
@@ -76,7 +88,7 @@ export class StateStore {
         this.db.exec("COMMIT");
         return { ok: false, reason: "expired" };
       }
-      this.db.prepare("UPDATE pending_actions SET status = 'executing' WHERE id = ? AND status = 'pending'").run(String(row.id));
+      this.db.prepare("UPDATE pending_actions SET status = ? WHERE id = ? AND status = 'pending'").run(nextStatus, String(row.id));
       this.db.exec("COMMIT");
       return {
         ok: true,

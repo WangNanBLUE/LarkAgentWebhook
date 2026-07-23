@@ -3,8 +3,9 @@ import { classifyCliError } from "../src/lark/errors.js";
 import { StateStore } from "../src/state/store.js";
 import { MessageService, shouldHandleEvent, writeMessageLog } from "../src/service/message-service.js";
 import { AgentRunner, addDashboardDateFilter, buildAggregateQuery, buildChartComponentConfig } from "../src/agent/runner.js";
-import { validateDashboardConfig } from "../src/lark/base-tools.js";
+import { BaseTools, validateDashboardConfig } from "../src/lark/base-tools.js";
 import { AGENT_INSTRUCTIONS } from "../src/agent/instructions.js";
+import { TOOL_DEFINITIONS } from "../src/agent/tool-schemas.js";
 import { loadConfig } from "../src/config.js";
 
 const stores: StateStore[] = [];
@@ -35,9 +36,90 @@ describe("configuration", () => {
   test("rejects unknown response modes", () => {
     expect(() => loadConfig({ ...configEnv, LARK_RESPONSE_MODE: "invalid" })).toThrow();
   });
+
+  test("exposes create and append document tools without document search", () => {
+    const names = TOOL_DEFINITIONS.map((tool) => tool.name);
+    expect(names).toContain("create_document");
+    expect(names).toContain("append_document");
+    expect(names.some((name) => name.includes("search_document") || name.includes("read_document"))).toBe(false);
+  });
 });
 
 describe("agent streaming", () => {
+  test("dispatches structured document creation arguments", async () => {
+    const call = {
+      type: "function_call",
+      id: "fc_doc",
+      call_id: "call_doc",
+      name: "create_document",
+      arguments: JSON.stringify({ title: "竞品分析", content_xml: "<p>分析内容</p>" }),
+      status: "completed",
+    };
+    const makeStream = (events: unknown[], response: unknown) => ({
+      async *[Symbol.asyncIterator]() {
+        for (const event of events) yield event;
+      },
+      finalResponse: vi.fn(async () => response),
+    });
+    const responses = {
+      stream: vi.fn()
+        .mockReturnValueOnce(makeStream(
+          [{ type: "response.output_item.added", item: call }],
+          { output: [call], output_text: "" },
+        ))
+        .mockReturnValueOnce(makeStream(
+          [{ type: "response.output_text.delta", delta: "文档已创建" }],
+          { output: [{ type: "message" }], output_text: "文档已创建" },
+        )),
+    };
+    const tools = { createDocument: vi.fn(async () => ({ url: "https://example.test/docx/1" })) };
+    const runner = new AgentRunner(loadConfig(configEnv), tools as never, {} as never, responses as never);
+
+    await runner.run({
+      event: { message_id: "om_doc", chat_id: "oc_1", sender_id: "ou_1", chat_type: "p2p", content: "创建文档" },
+      prompt: "创建文档",
+      conversationKey: "om_doc",
+    });
+
+    expect(tools.createDocument).toHaveBeenCalledWith("竞品分析", "<p>分析内容</p>");
+  });
+
+  test("rejects an incomplete response instead of returning partial text", async () => {
+    const partialResponse = {
+      id: "resp_incomplete",
+      output: [{ type: "message" }],
+      output_text: "结论：建议选择 An Under",
+      status: "incomplete",
+      incomplete_details: { reason: "max_output_tokens" },
+      error: null,
+    };
+    const stream = {
+      async *[Symbol.asyncIterator]() {
+        yield { type: "response.output_text.delta", delta: partialResponse.output_text };
+        yield { type: "response.incomplete", response: partialResponse };
+      },
+      finalResponse: vi.fn(async () => ({ ...partialResponse, status: "in_progress", incomplete_details: null })),
+    };
+    const runner = new AgentRunner(
+      loadConfig(configEnv),
+      {} as never,
+      {} as never,
+      { stream: vi.fn(() => stream) } as never,
+    );
+
+    await expect(runner.run({
+      event: {
+        message_id: "om_incomplete",
+        chat_id: "oc_1",
+        sender_id: "ou_1",
+        chat_type: "p2p",
+        content: "比较两本书",
+      },
+      prompt: "比较两本书",
+      conversationKey: "om_incomplete",
+    })).rejects.toThrow("Agent response incomplete: max_output_tokens");
+  });
+
   test("streams text and reports tool progress across response rounds", async () => {
     const call = {
       type: "function_call",
@@ -181,7 +263,89 @@ describe("CLI failures", () => {
   });
 });
 
+describe("document writes", () => {
+  test("creates and appends documents as the application without changing strict mode", async () => {
+    const cli = {
+      run: vi.fn(async () => ({ ok: true })),
+      runRetryable: vi.fn(),
+      runText: vi.fn(async () => ""),
+    };
+    const tools = new BaseTools(cli as never, loadConfig(configEnv), {} as never);
+
+    await tools.createDocument("竞品分析", "<p>分析内容</p>");
+    await tools.appendDocument("docx_token", "<h2>补充</h2><p>新增内容</p>");
+
+    expect(cli.run).toHaveBeenNthCalledWith(1, [
+      "docs", "+create",
+      "--title", "竞品分析",
+      "--content", "<p>分析内容</p>",
+      "--as", "bot", "--format", "json",
+    ]);
+    expect(cli.run).toHaveBeenNthCalledWith(2, [
+      "docs", "+update",
+      "--doc", "docx_token",
+      "--command", "append",
+      "--content", "<h2>补充</h2><p>新增内容</p>",
+      "--as", "bot", "--format", "json",
+    ]);
+    expect(cli.runRetryable).not.toHaveBeenCalled();
+    expect(cli.runText).not.toHaveBeenCalled();
+  });
+});
+
 describe("message routing", () => {
+  test("includes the directly replied message as quoted agent context", async () => {
+    const event = {
+      message_id: "om_reply",
+      chat_id: "oc_dm",
+      sender_id: "ou_user",
+      chat_type: "p2p" as const,
+      content: "为什么？",
+      reply_to: "om_parent",
+    };
+    const state = { markMessageProcessed: vi.fn(() => true) };
+    const agent = { run: vi.fn(async (_context: { prompt: string }) => "因为阅读量更高。") };
+    const tools = {
+      getMessageContext: vi.fn(async () => ({ content: "建议选择 The Charismatic Charlie Wade。", senderName: "竞品分析" })),
+      reply: vi.fn(async () => ({})),
+      sendToChat: vi.fn(async () => ({})),
+    };
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    await new MessageService("ou_bot", state as never, agent as never, tools as never).handle(event);
+    write.mockRestore();
+
+    expect(tools.getMessageContext).toHaveBeenCalledWith("om_parent");
+    expect(agent.run).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: expect.stringContaining("建议选择 The Charismatic Charlie Wade。"),
+    }));
+    expect(agent.run.mock.calls[0]?.[0].prompt).toContain("当前消息：\n为什么？");
+  });
+
+  test("fetches referenced message content through the bot IM API", async () => {
+    const cli = {
+      runRetryable: vi.fn(async () => ({
+        messages: [{
+          message_id: "om_parent",
+          sender: { name: "竞品分析" },
+          content: "上一条分析",
+        }],
+      })),
+    };
+    const tools = new BaseTools(cli as never, loadConfig(configEnv), {} as never);
+
+    await expect(tools.getMessageContext("om_parent")).resolves.toEqual({
+      content: "上一条分析",
+      senderName: "竞品分析",
+    });
+    expect(cli.runRetryable).toHaveBeenCalledWith([
+      "im", "+messages-mget",
+      "--message-ids", "om_parent",
+      "--no-reactions",
+      "--as", "bot", "--format", "json",
+    ]);
+  });
+
   test("accepts direct messages and only mentioned group messages", () => {
     const base = {
       message_id: "om_1",
@@ -234,7 +398,7 @@ describe("message routing", () => {
     expect(tools.reply).toHaveBeenCalledWith("om_dm", "你好，有什么可以帮你？", false);
   });
 
-  test("replies to mentioned group messages in the main stream and mentions the sender", async () => {
+  test("quotes mentioned group messages in the main stream and mentions the sender", async () => {
     const event = {
       message_id: "om_group",
       chat_id: "oc_group",
@@ -251,20 +415,23 @@ describe("message routing", () => {
     await new MessageService("ou_bot", state as never, agent as never, tools as never).handle(event);
     write.mockRestore();
 
-    expect(tools.sendToChat).toHaveBeenCalledWith(
-      "oc_group",
+    expect(tools.reply).toHaveBeenCalledWith(
+      "om_group",
       '<at user_id="ou_sender"></at> 分析完成',
+      false,
     );
-    expect(tools.reply).not.toHaveBeenCalled();
+    expect(tools.sendToChat).not.toHaveBeenCalled();
   });
 
-  test("claims group confirmations by chat instead of the triggering message", async () => {
+  test("claims confirmations by chat even when replying to a card", async () => {
     const event = {
       message_id: "om_confirm",
       chat_id: "oc_group",
       sender_id: "ou_sender",
       chat_type: "group" as const,
       content: "@竞品分析 确认",
+      root_id: "om_card_root",
+      reply_to: "om_card",
       mentions: [{ id: "ou_bot", key: "@_user_1", name: "竞品分析" }],
     };
     const state = {
@@ -277,7 +444,7 @@ describe("message routing", () => {
     await new MessageService("ou_bot", state as never, { run: vi.fn() } as never, tools as never).handle(event);
     write.mockRestore();
 
-    expect(state.claimPendingAction).toHaveBeenCalledWith("ou_sender", "oc_group", "oc_group");
+    expect(state.claimPendingAction).toHaveBeenCalledWith("ou_sender", "oc_group");
   });
 
   test("streams a card before running the agent and forwards progress", async () => {
@@ -345,10 +512,11 @@ describe("message routing", () => {
     stdout.mockRestore();
     stderr.mockRestore();
 
-    expect(tools.sendToChat).toHaveBeenCalledTimes(1);
-    expect(tools.sendToChat).toHaveBeenCalledWith(
-      "oc_group",
+    expect(tools.reply).toHaveBeenCalledTimes(1);
+    expect(tools.reply).toHaveBeenCalledWith(
+      "om_start_failure",
       expect.stringContaining("分析完成"),
+      false,
     );
   });
 
@@ -375,10 +543,11 @@ describe("message routing", () => {
     ).handle(event);
     stdout.mockRestore();
 
-    expect(tools.sendToChat).toHaveBeenCalledTimes(1);
-    expect(tools.sendToChat).toHaveBeenCalledWith(
-      "oc_group",
+    expect(tools.reply).toHaveBeenCalledTimes(1);
+    expect(tools.reply).toHaveBeenCalledWith(
+      "om_finish_failure",
       expect.stringContaining("分析完成"),
+      false,
     );
   });
 
@@ -403,9 +572,10 @@ describe("message routing", () => {
     stdout.mockRestore();
 
     expect(cards.start).not.toHaveBeenCalled();
-    expect(tools.sendToChat).toHaveBeenCalledWith(
-      "oc_group",
+    expect(tools.reply).toHaveBeenCalledWith(
+      "om_text",
       expect.stringContaining("分析完成"),
+      false,
     );
   });
 });
@@ -419,7 +589,7 @@ describe("state", () => {
     expect(store.markMessageProcessed("om_1", 1001)).toBe(false);
   });
 
-  test("claims a pending action once for its owner and thread before expiry", () => {
+  test("claims a pending action once for its owner and chat before expiry", () => {
     const store = new StateStore(":memory:");
     stores.push(store);
     store.createPendingAction({
@@ -433,11 +603,11 @@ describe("state", () => {
       payload: { name: "来源分布" },
     });
 
-    expect(store.claimPendingAction("ou_other", "oc_1", "omt_1", 1500)).toEqual({ ok: false, reason: "not_found" });
+    expect(store.claimPendingAction("ou_other", "oc_1", 1500)).toEqual({ ok: false, reason: "not_found" });
 
-    const claimed = store.claimPendingAction("ou_owner", "oc_1", "omt_1", 1500);
+    const claimed = store.claimPendingAction("ou_owner", "oc_1", 1500);
     expect(claimed.ok).toBe(true);
-    expect(store.claimPendingAction("ou_owner", "oc_1", "omt_1", 1500)).toEqual({ ok: false, reason: "not_found" });
+    expect(store.claimPendingAction("ou_owner", "oc_1", 1500)).toEqual({ ok: false, reason: "not_found" });
 
     store.createPendingAction({
       id: "pa_2",
@@ -449,7 +619,7 @@ describe("state", () => {
       kind: "component.update",
       payload: { name: "来源分布 2" },
     });
-    expect(store.claimPendingAction("ou_owner", "oc_1", "omt_1", 1001)).toEqual({ ok: false, reason: "expired" });
+    expect(store.claimPendingAction("ou_owner", "oc_1", 1001)).toEqual({ ok: false, reason: "expired" });
   });
 
   test("records an unknown external write outcome", () => {
@@ -459,7 +629,7 @@ describe("state", () => {
       id: "pa_unknown", requesterId: "ou_owner", chatId: "oc_1", rootMessageId: "om_1",
       threadId: "om_1", expiresAt: 2000, kind: "component.create", payload: { name: "来源分布" },
     });
-    expect(store.claimPendingAction("ou_owner", "oc_1", "om_1", 1500).ok).toBe(true);
+    expect(store.claimPendingAction("ou_owner", "oc_1", 1500).ok).toBe(true);
     store.markActionUnknown("pa_unknown", "network timeout");
     expect(store.getPendingActionStatus("pa_unknown")).toBe("unknown");
   });
@@ -498,10 +668,40 @@ describe("dashboard filters", () => {
     })).toThrow();
   });
 
-  test("uses numeric milliseconds for dashboard datetime filters", () => {
+  test("uses the native ExactDate tuple for dashboard datetime filters", () => {
     const result = addDashboardDateFilter({ count_all: true }, "快照日期", "2026-07-22");
     const filter = result.filter as { conditions: Array<{ value: unknown }> };
-    expect(filter.conditions[0]?.value).toBe(1784649600000);
+    expect(filter.conditions[0]?.value).toEqual(["ExactDate", 1784649600000]);
+  });
+
+  test("accepts the service-owned ExactDate tuple during proposal validation", () => {
+    const result = addDashboardDateFilter({
+      count_all: true,
+      group_by: [{ field_name: "作品来源", mode: "integrated" }],
+    }, "快照日期", "2026-07-22");
+
+    expect(() => validateDashboardConfig("ring", result, true)).not.toThrow();
+  });
+
+  test("replaces model-provided snapshot filters with the service-owned condition", () => {
+    const result = addDashboardDateFilter({
+      count_all: true,
+      filter: {
+        conjunction: "or",
+        conditions: [
+          { field_name: "作品来源", operator: "is", value: "原创" },
+          { field_name: "快照日期", operator: "is", value: ["ExactDate", "1784649600000"] },
+        ],
+      },
+    }, "快照日期", "2026-07-22");
+
+    expect(result.filter).toEqual({
+      conjunction: "and",
+      conditions: [
+        { field_name: "作品来源", operator: "is", value: "原创" },
+        { field_name: "快照日期", operator: "is", value: ["ExactDate", 1784649600000] },
+      ],
+    });
   });
 
   test("does not add datasource fields to text components", () => {

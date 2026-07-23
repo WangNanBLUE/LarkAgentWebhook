@@ -1,28 +1,27 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
-import type { MessageEvent } from "../types.js";
 import { LarkCli } from "./cli.js";
 
-export class EventConsumer {
+export class EventConsumer<T> {
   private child?: ChildProcessWithoutNullStreams;
   private stopping = false;
   private accepting = false;
   private readonly active = new Set<Promise<void>>();
 
-  constructor(private readonly cli: LarkCli) {}
+  constructor(private readonly cli: LarkCli, private readonly eventKey: string) {}
 
-  start(onEvent: (event: MessageEvent) => Promise<void>, onExit: (error?: Error) => void): Promise<void> {
+  start(onEvent: (event: T) => Promise<void>, onExit: (error?: Error) => void): Promise<void> {
     if (this.child) throw new Error("Event consumer is already running");
     this.stopping = false;
     this.accepting = true;
-    const child = this.cli.spawnEventConsumer();
+    const child = this.cli.spawnEventConsumer(this.eventKey);
     this.child = child;
 
     createInterface({ input: child.stdout }).on("line", (line) => {
       if (!line.trim()) return;
       try {
         if (!this.accepting) return;
-        const task = Promise.resolve().then(() => onEvent(JSON.parse(line) as MessageEvent));
+        const task = Promise.resolve().then(() => onEvent(JSON.parse(line) as T));
         this.active.add(task);
         void task.catch((error) => {
           process.stderr.write(`[event] handler failed: ${error instanceof Error ? error.message : String(error)}\n`);
@@ -44,7 +43,7 @@ export class EventConsumer {
       };
       createInterface({ input: child.stderr }).on("line", (line) => {
         process.stderr.write(`${line}\n`);
-        if (!ready && line.includes("[event] ready event_key=im.message.receive_v1")) {
+        if (!ready && line.includes(`[event] ready event_key=${this.eventKey}`)) {
           ready = true;
           resolve();
         }

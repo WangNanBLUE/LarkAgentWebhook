@@ -52,8 +52,7 @@ export class StreamingCardKit {
     ]);
     const cardId = findString(created, "card_id");
     if (!cardId) throw new Error("CardKit create response did not include card_id");
-    if (event.chat_type === "group") await this.tools.sendCardToChat(event.chat_id, cardId);
-    else await this.tools.replyCard(event.message_id, cardId, false);
+    await this.tools.replyCard(event.message_id, cardId, false);
     return new StreamingCardSession(this.cli, cardId, mentionId ? `<at id=${mentionId}></at> ` : "");
   }
 }
@@ -95,6 +94,9 @@ export class StreamingCardSession {
     this.flushAnswer();
     this.updateElement(STATUS_ELEMENT_ID, `${this.statusPrefix}分析完成`);
     this.updateSettings(this.answer);
+    this.updateElementProperties(ANSWER_ELEMENT_ID, {
+      content: this.answer ? `${ANSWER_PREFIX}${this.answer}` : ANSWER_PREFIX,
+    });
     await this.queue;
     return this.failure === undefined;
   }
@@ -111,6 +113,7 @@ export class StreamingCardSession {
     this.flushAnswer();
     this.updateElement(STATUS_ELEMENT_ID, `${this.statusPrefix}分析失败`);
     this.updateSettings(text);
+    this.updateElementProperties(ANSWER_ELEMENT_ID, { content: `${ANSWER_PREFIX}${text}` });
     await this.queue;
     return this.failure === undefined;
   }
@@ -137,6 +140,15 @@ export class StreamingCardSession {
     const path = `/open-apis/cardkit/v1/cards/${encodeURIComponent(this.cardId)}/settings`;
     this.enqueue("PATCH", path, (sequence) => ({
       settings: JSON.stringify({ config: { streaming_mode: false, summary: { content: summary } } }),
+      sequence,
+      uuid: randomUUID(),
+    }));
+  }
+
+  private updateElementProperties(elementId: string, partialElement: Record<string, unknown>): void {
+    const path = `/open-apis/cardkit/v1/cards/${encodeURIComponent(this.cardId)}/elements/${elementId}`;
+    this.enqueue("PATCH", path, (sequence) => ({
+      partial_element: JSON.stringify(partialElement),
       sequence,
       uuid: randomUUID(),
     }));

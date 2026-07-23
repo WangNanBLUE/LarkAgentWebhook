@@ -38,7 +38,7 @@ describe("interactive card delivery", () => {
 });
 
 describe("CardKit streaming", () => {
-  test("creates a Card 2.0 entity and sends it directly to the group", async () => {
+  test("creates a Card 2.0 entity and replies in the group main stream", async () => {
     const cli = { runRetryable: vi.fn(async (_args: string[]) => ({ data: { card_id: "card_1" } })) };
     const tools = { replyCard: vi.fn(async () => ({})), sendCardToChat: vi.fn(async () => ({})) };
     const cards = new StreamingCardKit(cli as never, tools as never);
@@ -65,8 +65,8 @@ describe("CardKit streaming", () => {
       expect.objectContaining({ element_id: STATUS_ELEMENT_ID, content: "<at id=ou_sender></at> 正在分析" }),
       expect.objectContaining({ element_id: ANSWER_ELEMENT_ID, content: ANSWER_PREFIX }),
     ]));
-    expect(tools.sendCardToChat).toHaveBeenCalledWith("oc_group", "card_1");
-    expect(tools.replyCard).not.toHaveBeenCalled();
+    expect(tools.replyCard).toHaveBeenCalledWith("om_group", "card_1", false);
+    expect(tools.sendCardToChat).not.toHaveBeenCalled();
   });
 
   test("coalesces deltas and serializes status, content, and close updates", async () => {
@@ -156,5 +156,41 @@ describe("CardKit streaming", () => {
       .filter((args) => args[2]?.includes(`/elements/${ANSWER_ELEMENT_ID}/content`))
       .map((args) => JSON.parse(args[args.indexOf("--data") + 1] ?? "{}") as { content?: string });
     expect(answerWrites.at(-1)?.content).toBe(`${ANSWER_PREFIX}我先查询。最终结论`);
+  });
+
+  test("writes the complete answer again after closing streaming mode", async () => {
+    const cli = { runRetryable: vi.fn(async (_args: string[]) => ({ card_id: "card_1" })) };
+    const tools = { replyCard: vi.fn(async () => ({})) };
+    const session = await new StreamingCardKit(cli as never, tools as never).start({
+      message_id: "om_final",
+      chat_id: "oc_1",
+      sender_id: "ou_1",
+      chat_type: "p2p",
+      content: "比较两本书",
+    });
+    cli.runRetryable.mockClear();
+
+    session.appendText("结论：建议选择 An Under");
+    expect(await session.finish("结论：建议选择 An Understated Dominance。")).toBe(true);
+
+    const writes = cli.runRetryable.mock.calls.map((call) => {
+      const args = call[0] as string[];
+      return {
+        method: args[1],
+        path: args[2] ?? "",
+        body: JSON.parse(args[args.indexOf("--data") + 1] ?? "{}") as Record<string, unknown>,
+      };
+    });
+    const closeIndex = writes.findIndex((write) => write.path.endsWith("/settings"));
+    const finalWriteIndex = writes.findIndex((write) => (
+      write.method === "PATCH" && write.path.endsWith(`/elements/${ANSWER_ELEMENT_ID}`)
+    ));
+    const finalWrite = writes[finalWriteIndex];
+
+    expect(closeIndex).toBeGreaterThanOrEqual(0);
+    expect(finalWriteIndex).toBeGreaterThan(closeIndex);
+    expect(JSON.parse(String(finalWrite?.body.partial_element))).toEqual({
+      content: `${ANSWER_PREFIX}结论：建议选择 An Understated Dominance。`,
+    });
   });
 });

@@ -6,7 +6,9 @@ import { StreamingCardKit } from "./lark/cardkit.js";
 import { LarkCli } from "./lark/cli.js";
 import { EventConsumer } from "./lark/event-consumer.js";
 import { MessageService } from "./service/message-service.js";
+import { ApprovalService } from "./service/approval-service.js";
 import { StateStore } from "./state/store.js";
+import type { CardActionEvent, MessageEvent } from "./types.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -20,6 +22,7 @@ async function main(): Promise<void> {
     feishuReady: false,
     modelConfigured: true,
   };
+  await cli.runText(["config", "strict-mode", "bot"]);
   const whoami = JSON.parse(await cli.runText(["whoami"])) as { identity?: string; appId?: string; available?: boolean };
   if (whoami.identity !== "bot" || whoami.available !== true || whoami.appId !== config.lark.expectedAppId) {
     throw new Error("lark-cli must use the 竞品分析 profile with strict-mode bot");
@@ -41,28 +44,41 @@ async function main(): Promise<void> {
     config.lark.responseMode,
     cards,
   );
-  const consumer = new EventConsumer(cli);
-  let restartDelay = 1_000;
+  const approvalService = new ApprovalService(stateStore, baseTools);
+  const messageConsumer = new EventConsumer<MessageEvent>(cli, "im.message.receive_v1");
+  const approvalConsumer = new EventConsumer<CardActionEvent>(cli, "card.action.trigger");
+  const ready = { messages: false, approvals: false };
+  const restartDelay = { messages: 1_000, approvals: 1_000 };
   let shuttingDown = false;
 
-  const startConsumer = async (): Promise<void> => {
+  const updateHealth = (): void => {
+    health.eventReady = ready.messages && ready.approvals;
+    health.degradedReason = health.eventReady ? undefined : "One or more event consumers are unavailable";
+    if (health.eventReady) process.stdout.write(`竞品分析服务已就绪：http://${config.health.host}:${config.health.port}/healthz\n`);
+  };
+  const startConsumer = async <T>(
+    name: keyof typeof ready,
+    consumer: EventConsumer<T>,
+    handler: (event: T) => Promise<void>,
+  ): Promise<void> => {
     try {
-      await consumer.start((event) => service.handle(event), (error) => {
-        health.eventReady = false;
+      await consumer.start(handler, (error) => {
+        ready[name] = false;
         health.degradedReason = error?.message;
+        updateHealth();
         if (shuttingDown) return;
-        setTimeout(() => void startConsumer(), restartDelay);
-        restartDelay = Math.min(restartDelay * 2, 30_000);
+        setTimeout(() => void startConsumer(name, consumer, handler), restartDelay[name]);
+        restartDelay[name] = Math.min(restartDelay[name] * 2, 30_000);
       });
-      health.eventReady = true;
-      health.degradedReason = undefined;
-      restartDelay = 1_000;
-      process.stdout.write(`竞品分析服务已就绪：http://${config.health.host}:${config.health.port}/healthz\n`);
+      ready[name] = true;
+      restartDelay[name] = 1_000;
+      updateHealth();
     } catch (error) {
-      health.eventReady = false;
+      ready[name] = false;
       health.degradedReason = error instanceof Error ? error.message : String(error);
-      if (!shuttingDown) setTimeout(() => void startConsumer(), restartDelay);
-      restartDelay = Math.min(restartDelay * 2, 30_000);
+      updateHealth();
+      if (!shuttingDown) setTimeout(() => void startConsumer(name, consumer, handler), restartDelay[name]);
+      restartDelay[name] = Math.min(restartDelay[name] * 2, 30_000);
     }
   };
 
@@ -70,10 +86,11 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     health.eventReady = false;
-    consumer.stop();
+    messageConsumer.stop();
+    approvalConsumer.stop();
     const hardExit = setTimeout(() => process.exit(1), 5_000);
     hardExit.unref();
-    await consumer.drain(4_000);
+    await Promise.all([messageConsumer.drain(4_000), approvalConsumer.drain(4_000)]);
     await new Promise<void>((resolve) => healthServer.close(() => resolve()));
     stateStore.close();
     clearTimeout(hardExit);
@@ -81,7 +98,10 @@ async function main(): Promise<void> {
   };
   process.on("SIGINT", () => void shutdown());
   process.on("SIGTERM", () => void shutdown());
-  await startConsumer();
+  await Promise.all([
+    startConsumer("messages", messageConsumer, (event) => service.handle(event)),
+    startConsumer("approvals", approvalConsumer, (event) => approvalService.handle(event)),
+  ]);
 }
 
 main().catch((error) => {
