@@ -1,4 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
+import { BaseResource } from "../src/lark/base-resource.js";
 import { LarkCliError } from "../src/lark/errors.js";
 import { SourceReader } from "../src/lark/source-reader.js";
 import { SourceBudget } from "../src/sources/budget.js";
@@ -127,6 +128,79 @@ describe("Lark source reader", () => {
     ).require("src_wiki");
 
     await expect(new SourceReader(cli as never).resolveWiki(source, new SourceBudget())).rejects.toThrow("forbidden");
+    expect(cli.runRetryable).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Base resource reader", () => {
+  test("resolves and queries the Base provided in this request", async () => {
+    const cli = {
+      runRetryable: vi.fn()
+        .mockResolvedValueOnce({ base_token: "bas_1", table_id: "tbl_1" })
+        .mockResolvedValueOnce({ fields: [{ field_name: "地区" }, { field_name: "收入" }] })
+        .mockResolvedValueOnce({ rows: [{ region: "华东", revenue: 12 }], has_more: false }),
+    };
+    const source = SourceRegistry.fromPrompt(
+      "https://a.feishu.cn/base/bas_1?table=tbl_1",
+      { idFactory: () => "src_base" },
+    ).require("src_base");
+    const resource = new BaseResource(cli as never);
+    const location = await resource.resolve(source);
+    await resource.fields(location, "tbl_1");
+    const result = await resource.query(location, source, {
+      table_id: "tbl_1",
+      dimensions: [{ field_name: "地区", alias: "region" }],
+      measures: [{ field_name: "收入", aggregation: "sum", alias: "revenue" }],
+      filters: [],
+      filter_conjunction: "and",
+      sort: [],
+      limit: 20,
+    }, new SourceBudget());
+
+    expect(location).toEqual({ sourceId: "src_base", baseToken: "bas_1", tableId: "tbl_1" });
+    expect(result).toMatchObject({
+      source_id: "src_base",
+      source_type: "base",
+      range: "table:tbl_1",
+      complete: true,
+    });
+    expect(cli.runRetryable).toHaveBeenNthCalledWith(1, [
+      "base", "+url-resolve",
+      "--url", "https://a.feishu.cn/base/bas_1?table=tbl_1",
+      "--as", "bot",
+      "--format", "json",
+    ]);
+    const queryArgs = cli.runRetryable.mock.calls[2]?.[0] as string[];
+    expect(queryArgs.slice(0, 4)).toEqual(["base", "+data-query", "--base-token", "bas_1"]);
+    expect(queryArgs).toContain("--dsl");
+    expect(JSON.parse(queryArgs[queryArgs.indexOf("--dsl") + 1] ?? "{}")).toMatchObject({
+      datasource: { type: "table", table: { tableId: "tbl_1" } },
+      pagination: { limit: 20 },
+      shaper: { format: "flat" },
+    });
+    expect(queryArgs).toContain("bot");
+  });
+
+  test("requires field inspection before querying a table", async () => {
+    const cli = {
+      runRetryable: vi.fn(async () => ({ base_token: "bas_1", table_id: "tbl_1" })),
+    };
+    const source = SourceRegistry.fromPrompt(
+      "https://a.feishu.cn/base/bas_1?table=tbl_1",
+      { idFactory: () => "src_base" },
+    ).require("src_base");
+    const resource = new BaseResource(cli as never);
+    const location = await resource.resolve(source);
+
+    await expect(resource.query(location, source, {
+      table_id: "tbl_1",
+      dimensions: [],
+      measures: [{ field_name: "收入", aggregation: "sum", alias: "revenue" }],
+      filters: [],
+      filter_conjunction: "and",
+      sort: [],
+      limit: 20,
+    }, new SourceBudget())).rejects.toThrow("fields");
     expect(cli.runRetryable).toHaveBeenCalledTimes(1);
   });
 });
