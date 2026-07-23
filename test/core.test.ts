@@ -4,6 +4,7 @@ import { StateStore } from "../src/state/store.js";
 import { MessageService, shouldHandleEvent, writeMessageLog } from "../src/service/message-service.js";
 import { AgentRunner, addDashboardDateFilter, buildAggregateQuery } from "../src/agent/runner.js";
 import { validateDashboardConfig } from "../src/lark/base-tools.js";
+import { AGENT_INSTRUCTIONS } from "../src/agent/instructions.js";
 import { loadConfig } from "../src/config.js";
 
 const stores: StateStore[] = [];
@@ -20,6 +21,12 @@ afterEach(() => {
 });
 
 describe("configuration", () => {
+  test("system prompt rejects off-topic work and requires fresh data evidence", () => {
+    expect(AGENT_INSTRUCTIONS).toContain("我只处理竞品书籍数据分析和 AI 分析看板维护");
+    expect(AGENT_INSTRUCTIONS).toContain("本轮必须先成功调用 aggregate_books 或 query_books");
+    expect(AGENT_INSTRUCTIONS).toContain("不得凭常识、历史对话或模型记忆作答");
+  });
+
   test("defaults to streaming cards and supports explicit text mode", () => {
     expect(loadConfig(configEnv).lark.responseMode).toBe("streaming_card");
     expect(loadConfig({ ...configEnv, LARK_RESPONSE_MODE: "text" }).lark.responseMode).toBe("text");
