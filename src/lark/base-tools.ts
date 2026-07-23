@@ -8,7 +8,7 @@ import { buildApprovalCard } from "./approval-card.js";
 import { StateStore } from "../state/store.js";
 import { LarkCli } from "./cli.js";
 
-const componentTypes = ["statistics", "column", "line", "pie", "ring", "text"] as const;
+const componentTypes = ["statistics", "column", "bar", "line", "pie", "ring", "area", "combo", "scatter", "funnel", "wordCloud", "radar", "text"] as const;
 const createSchema = z.object({
   action: z.literal("create"),
   name: z.string().min(1).max(100),
@@ -189,33 +189,6 @@ export class BaseTools {
     const next = this.writeQueue.then(run, run);
     this.writeQueue = next.catch(() => undefined);
     return next;
-  }
-
-  async reconcileExecutingActions(): Promise<void> {
-    for (const item of this.state.listExecutingActions()) {
-      const proposal = item.action.payload as ComponentProposal;
-      const context = item.reconciliation as { dashboardId?: string; existingBlockIds?: string[] } | undefined;
-      if (item.action.kind !== "component.create" || proposal.action !== "create" || !context?.dashboardId || !context.existingBlockIds) {
-        this.state.markActionUnknown(item.action.id, "Service restarted while the external write was in progress");
-        continue;
-      }
-      try {
-        const oldIds = new Set(context.existingBlockIds);
-        const reconciled = (await this.listDashboardBlocks(context.dashboardId)).find((block) => {
-          const id = findString(block, ["block_id", "id"]);
-          return id && !oldIds.has(id) && findString(block, ["name", "block_name"]) === proposal.name;
-        });
-        const blockId = reconciled ? findString(reconciled, ["block_id", "id"]) : undefined;
-        if (!blockId) {
-          this.state.markActionUnknown(item.action.id, "No matching component was found after restart reconciliation");
-          continue;
-        }
-        this.state.registerComponent(blockId, proposal.name, proposal.type, proposal.dataConfig);
-        this.state.markActionCompleted(item.action.id, { action: "created_reconciled_after_restart", block_id: blockId, dashboard_id: context.dashboardId });
-      } catch (error) {
-        this.state.markActionUnknown(item.action.id, error instanceof Error ? error.message : String(error));
-      }
-    }
   }
 
   async ensureDashboard(): Promise<string> {

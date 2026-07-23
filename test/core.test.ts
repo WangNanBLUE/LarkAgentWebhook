@@ -9,7 +9,7 @@ import { AGENT_INSTRUCTIONS } from "../src/agent/instructions.js";
 import { TOOL_DEFINITIONS } from "../src/agent/tool-schemas.js";
 import { loadConfig } from "../src/config.js";
 import { SourceBudget } from "../src/sources/budget.js";
-import { SourceRegistry } from "../src/sources/registry.js";
+import { buildSources, SourceRegistry } from "../src/sources/registry.js";
 
 const stores: StateStore[] = [];
 
@@ -41,6 +41,18 @@ describe("configuration", () => {
     expect(loadConfig({ ...configEnv, LARK_RESPONSE_MODE: "text" }).lark.responseMode).toBe("text");
   });
 
+  test("starts without a configured default Base and injects it only for explicit competitor analysis", () => {
+    const config = loadConfig(configEnv);
+    expect(config.lark.defaultBase).toBeUndefined();
+    const defaultBase = { baseToken: "bas_default", tableId: "tbl_default", tableName: "竞品书籍快照" };
+    expect(buildSources("分析最新竞品书籍", defaultBase).list()).toContainEqual(
+      expect.objectContaining({ id: "src_default_base", kind: "base" }),
+    );
+    expect(buildSources("分析这份收入数据", defaultBase).list()).not.toContainEqual(
+      expect.objectContaining({ id: "src_default_base" }),
+    );
+  });
+
   test("rejects unknown response modes", () => {
     expect(() => loadConfig({ ...configEnv, LARK_RESPONSE_MODE: "invalid" })).toThrow();
   });
@@ -70,7 +82,7 @@ describe("agent streaming", () => {
       type: "function_call",
       id: "fc_doc",
       call_id: "call_doc",
-      name: "create_document",
+      name: "propose_document_create",
       arguments: JSON.stringify({ title: "竞品分析", content_xml: "<p>分析内容</p>" }),
       status: "completed",
     };
@@ -91,8 +103,11 @@ describe("agent streaming", () => {
           { output: [{ type: "message" }], output_text: "文档已创建" },
         )),
     };
-    const tools = { createDocument: vi.fn(async () => ({ url: "https://example.test/docx/1" })) };
-    const runner = new AgentRunner(loadConfig(configEnv), tools as never, {} as never, responses as never);
+    const actions = { proposeDocumentCreate: vi.fn(async () => ({ id: "pa_1" })) };
+    const runner = new AgentRunner(
+      loadConfig(configEnv), {} as never, {} as never, responses as never,
+      undefined, undefined, actions as never,
+    );
 
     await runner.run({
       event: { message_id: "om_doc", chat_id: "oc_1", sender_id: "ou_1", chat_type: "p2p", content: "创建文档" },
@@ -101,7 +116,10 @@ describe("agent streaming", () => {
       ...sourceContext("创建文档"),
     });
 
-    expect(tools.createDocument).toHaveBeenCalledWith("竞品分析", "<p>分析内容</p>");
+    expect(actions.proposeDocumentCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ requesterId: "ou_1" }),
+      { title: "竞品分析", content_xml: "<p>分析内容</p>" },
+    );
   });
 
   test("rejects an incomplete response instead of returning partial text", async () => {
@@ -629,8 +647,8 @@ describe("state", () => {
       rootMessageId: "om_root",
       threadId: "omt_1",
       expiresAt: 2000,
-      kind: "component.create",
-      payload: { name: "来源分布" },
+      kind: "document.create",
+      payload: { kind: "document.create", title: "来源分布", contentXml: "<p>x</p>", idempotencyKey: "idem_1" },
     });
 
     expect(store.claimPendingAction("ou_other", "oc_1", 1500)).toEqual({ ok: false, reason: "not_found" });
@@ -646,8 +664,8 @@ describe("state", () => {
       rootMessageId: "om_root_2",
       threadId: "omt_1",
       expiresAt: 1000,
-      kind: "component.update",
-      payload: { name: "来源分布 2" },
+      kind: "document.create",
+      payload: { kind: "document.create", title: "来源分布 2", contentXml: "<p>x</p>", idempotencyKey: "idem_2" },
     });
     expect(store.claimPendingAction("ou_owner", "oc_1", 1001)).toEqual({ ok: false, reason: "expired" });
   });
@@ -657,7 +675,8 @@ describe("state", () => {
     stores.push(store);
     store.createPendingAction({
       id: "pa_unknown", requesterId: "ou_owner", chatId: "oc_1", rootMessageId: "om_1",
-      threadId: "om_1", expiresAt: 2000, kind: "component.create", payload: { name: "来源分布" },
+      threadId: "om_1", expiresAt: 2000, kind: "document.create",
+      payload: { kind: "document.create", title: "来源分布", contentXml: "<p>x</p>", idempotencyKey: "idem_3" },
     });
     expect(store.claimPendingAction("ou_owner", "oc_1", 1500).ok).toBe(true);
     store.markActionUnknown("pa_unknown", "network timeout");

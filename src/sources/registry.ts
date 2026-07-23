@@ -67,6 +67,24 @@ export class SourceRegistry {
   }
 }
 
+export interface DefaultBaseSourceConfig {
+  baseToken: string;
+  tableId: string;
+  tableName: string;
+}
+
+export function buildSources(prompt: string, defaultBase?: DefaultBaseSourceConfig): SourceRegistry {
+  const registry = SourceRegistry.fromPrompt(prompt);
+  const competitorRequest = /(竞品|书籍)/u.test(prompt) && /(分析|查询|统计|排行|对比)/u.test(prompt);
+  if (!defaultBase || registry.hasLinkedSource() || !competitorRequest) return registry;
+  return registry.withSource({
+    id: "src_default_base",
+    kind: "base",
+    title: defaultBase.tableName,
+    resolvedBase: { baseToken: defaultBase.baseToken, tableId: defaultBase.tableId },
+  });
+}
+
 function isFeishuHostname(hostname: string): boolean {
   return hostname === "feishu.cn" || hostname.endsWith(".feishu.cn");
 }

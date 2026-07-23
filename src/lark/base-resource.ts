@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { SourceBudget } from "../sources/budget.js";
 import type { InputSource, SourceReadResult } from "../sources/types.js";
+import { logSourceRead } from "../sources/read-log.js";
 import type { LarkCli } from "./cli.js";
 
 const dimensionSchema = z.object({
@@ -157,7 +158,7 @@ export class BaseResource {
     const serialized = JSON.stringify(data);
     const bounded = budget.take(source.id, serialized);
     const hasMore = findBoolean(data, ["has_more", "hasMore"]);
-    return {
+    const result: SourceReadResult = {
       source_id: source.id,
       source_type: "base",
       title: source.title,
@@ -166,6 +167,8 @@ export class BaseResource {
       truncated: bounded.truncated,
       content: bounded.text,
     };
+    logSourceRead(source, result);
+    return result;
   }
 
   listDashboards(location: BaseLocation): Promise<unknown> {

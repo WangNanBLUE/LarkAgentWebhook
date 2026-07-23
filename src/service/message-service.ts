@@ -1,10 +1,11 @@
 import type { AgentRunner, AgentRunContext } from "../agent/runner.js";
+import { ActionExecutionError, type ActionExecutor } from "../actions/action-executor.js";
 import type { AppConfig } from "../config.js";
 import type { BaseTools } from "../lark/base-tools.js";
 import type { StreamingCardKit, StreamingCardSession, StreamingCardStatus } from "../lark/cardkit.js";
 import type { StateStore } from "../state/store.js";
 import { SourceBudget } from "../sources/budget.js";
-import { SourceRegistry } from "../sources/registry.js";
+import { buildSources } from "../sources/registry.js";
 import type { MessageEvent } from "../types.js";
 
 export function shouldHandleEvent(event: MessageEvent, botIdentity: string): boolean {
@@ -34,6 +35,8 @@ export class MessageService {
     private readonly tools: BaseTools,
     private readonly responseMode: AppConfig["lark"]["responseMode"] = "text",
     private readonly cards?: Pick<StreamingCardKit, "start">,
+    private readonly executor?: ActionExecutor,
+    private readonly defaultBase?: AppConfig["lark"]["defaultBase"],
   ) {}
 
   async handle(event: MessageEvent): Promise<void> {
@@ -58,18 +61,24 @@ export class MessageService {
           return;
         }
         try {
-          const result = await this.tools.executeProposal(claimed.action.payload as never, claimed.action.id);
+          if (!this.executor) throw new Error("Action executor is not configured");
+          const result = await this.executor.execute(claimed.action);
           this.state.markActionCompleted(claimed.action.id, result);
           await this.reply(event, `变更已执行：\n${JSON.stringify(result, null, 2)}`);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          this.state.markActionUnknown(claimed.action.id, message);
-          await this.reply(event, `变更执行结果未知，系统不会自动重试，以避免重复创建。请检查 AI 分析看板后重新发起。\n原因：${message.slice(0, 300)}`);
+          if (error instanceof ActionExecutionError && error.outcome === "failed") {
+            this.state.markActionFailed(claimed.action.id, message);
+            await this.reply(event, `变更未执行：${message.slice(0, 300)}`);
+          } else {
+            this.state.markActionUnknown(claimed.action.id, message);
+            await this.reply(event, `变更执行结果未知，系统不会自动重试，以避免重复创建。\n原因：${message.slice(0, 300)}`);
+          }
         }
         return;
       }
 
-      const sources = SourceRegistry.fromPrompt(prompt);
+      const sources = buildSources(prompt, this.defaultBase);
       const agentPrompt = await this.buildAgentPrompt(event, prompt);
       const context: AgentRunContext = {
         event,

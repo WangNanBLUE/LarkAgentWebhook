@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { SourceBudget } from "../sources/budget.js";
 import type { InputSource, SourceReadResult } from "../sources/types.js";
+import { logSourceRead } from "../sources/read-log.js";
 import type { LarkCli } from "./cli.js";
 import { LarkCliError } from "./errors.js";
 
@@ -41,7 +42,40 @@ export class SourceReader {
       "--as", "bot",
       "--format", "json",
     ]);
-    return textResult(source, "document", "outline", false, findString(data, ["content"]) ?? "", budget);
+    return logged(source, textResult(source, "document", "outline", false, findString(data, ["content"]) ?? "", budget));
+  }
+
+  async inspectDocumentState(source: InputSource): Promise<{
+    document: string;
+    revisionId: number;
+    blocks: Array<{ id: string; content: string }>;
+  }> {
+    assertSource(source, ["document", "wiki"]);
+    const data = await this.cli.runRetryable<unknown>([
+      "docs", "+fetch", "--doc", requireUrl(source), "--detail", "full",
+      "--as", "bot", "--format", "json",
+    ]);
+    const revisionId = findNumber(data, ["revision_id", "revisionId", "revision"]);
+    if (revisionId === undefined) throw new Error("Document revision is unavailable");
+    return { document: requireUrl(source), revisionId, blocks: findBlocks(data) };
+  }
+
+  async inspectDocumentBlock(source: InputSource, blockId: string): Promise<{
+    document: string;
+    revisionId: number;
+    blockId: string;
+    content: string;
+  }> {
+    assertSource(source, ["document", "wiki"]);
+    const data = await this.cli.runRetryable<unknown>([
+      "docs", "+fetch", "--doc", requireUrl(source), "--scope", "range",
+      "--start-block-id", blockId, "--end-block-id", blockId, "--detail", "full",
+      "--as", "bot", "--format", "json",
+    ]);
+    const revisionId = findNumber(data, ["revision_id", "revisionId", "revision"]);
+    const content = findString(data, ["content"]);
+    if (revisionId === undefined || content === undefined) throw new Error("Document block state is unavailable");
+    return { document: requireUrl(source), revisionId, blockId, content };
   }
 
   async resolveWiki(source: InputSource, budget: SourceBudget): Promise<SourceReadResult> {
@@ -82,14 +116,14 @@ export class SourceReader {
     }
     args.push("--detail", "simple", "--as", "bot", "--format", "json");
     const data = await this.cli.runRetryable<unknown>(args);
-    return textResult(
+    return logged(source, textResult(
       source,
       "document",
       range,
       input.mode === "full",
       findString(data, ["content"]) ?? "",
       budget,
-    );
+    ));
   }
 
   async inspectSheet(source: InputSource): Promise<SourceReadResult> {
@@ -100,7 +134,7 @@ export class SourceReader {
       "--as", "bot",
       "--format", "json",
     ]);
-    return {
+    return logged(source, {
       source_id: source.id,
       source_type: "sheet",
       title: source.title,
@@ -108,7 +142,7 @@ export class SourceReader {
       complete: true,
       truncated: false,
       content: data,
-    };
+    });
   }
 
   async readSheet(
@@ -126,14 +160,14 @@ export class SourceReader {
       "--as", "bot",
       "--format", "json",
     ]);
-    return textResult(
+    return logged(source, textResult(
       source,
       "sheet",
       `${input.sheet_id}:${input.range}`,
       true,
       findString(data, ["annotated_csv", "csv", "content"]) ?? "",
       budget,
-    );
+    ));
   }
 }
 
@@ -163,6 +197,11 @@ function textResult(
   };
 }
 
+function logged(source: InputSource, result: SourceReadResult): SourceReadResult {
+  logSourceRead(source, result);
+  return result;
+}
+
 function assertSource(source: InputSource, kinds: InputSource["kind"][]): void {
   if (!kinds.includes(source.kind)) throw new Error(`Source ${source.id} is not a ${kinds.join(" or ")} source`);
 }
@@ -181,6 +220,27 @@ function findString(value: unknown, keys: string[]): string | undefined {
     if (found !== undefined) return found;
   }
   return undefined;
+}
+
+function findNumber(value: unknown, keys: string[]): number | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  for (const key of keys) if (typeof record[key] === "number") return record[key];
+  for (const child of Object.values(record)) {
+    const found = findNumber(child, keys);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+function findBlocks(value: unknown): Array<{ id: string; content: string }> {
+  if (!value || typeof value !== "object") return [];
+  if (Array.isArray(value)) return value.flatMap(findBlocks);
+  const record = value as Record<string, unknown>;
+  const id = findString(record, ["block_id", "blockId"]);
+  const content = findString(record, ["content", "text"]);
+  const nested = Object.values(record).flatMap(findBlocks);
+  return id ? [{ id, content: content ?? "" }, ...nested] : nested;
 }
 
 function canProbeAnotherResourceType(error: unknown): boolean {

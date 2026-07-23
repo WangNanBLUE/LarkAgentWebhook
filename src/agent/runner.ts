@@ -1,11 +1,11 @@
-import { randomUUID } from "node:crypto";
 import OpenAI from "openai";
 import type { Responses } from "openai/resources/responses/responses";
 import { z } from "zod";
 import type { AppConfig } from "../config.js";
+import type { ActionService } from "../actions/action-service.js";
 import { parseShanghaiDate } from "../date.js";
 import { BaseResource } from "../lark/base-resource.js";
-import type { ComponentProposal, ComponentType, MessageEvent, PendingAction } from "../types.js";
+import type { ComponentType, MessageEvent } from "../types.js";
 import { StateStore } from "../state/store.js";
 import { BaseTools } from "../lark/base-tools.js";
 import { SourceReader } from "../lark/source-reader.js";
@@ -102,16 +102,6 @@ const chartCreateArgsSchema = z.object({
   }
 });
 
-const documentCreateArgsSchema = z.object({
-  title: z.string().min(1).max(200),
-  content_xml: z.string().min(1).max(100_000),
-}).strict();
-
-const documentAppendArgsSchema = z.object({
-  document: z.string().min(1).max(1_000),
-  content_xml: z.string().min(1).max(100_000),
-}).strict();
-
 const documentReadToolSchema = z.object({
   source_id: z.string().min(1),
   mode: z.enum(["keyword", "section", "range", "full"]),
@@ -179,6 +169,7 @@ export class AgentRunner {
     responses?: ResponsesClient,
     private readonly sourceReader?: SourceReader,
     private readonly baseResource?: BaseResource,
+    private readonly actionService?: ActionService,
   ) {
     this.responses = responses ?? new OpenAI({ baseURL: config.openai.baseURL, apiKey: config.openai.apiKey }).responses;
   }
@@ -391,60 +382,18 @@ export class AgentRunner {
         const location = await base.resolve(source);
         return base.getDashboardBlock(location, String(args.dashboard_id), String(args.block_id));
       }
-      case "create_document": {
-        const parsed = documentCreateArgsSchema.parse(args);
-        return this.tools.createDocument(parsed.title, parsed.content_xml);
-      }
-      case "append_document": {
-        const parsed = documentAppendArgsSchema.parse(args);
-        return this.tools.appendDocument(parsed.document, parsed.content_xml);
-      }
-      case "propose_chart_component_create": {
-        const chart = buildChartComponentConfig(args);
-        const proposal = this.tools.validateProposal({
-          action: "create", name: chart.name, type: chart.type,
-          dataConfig: addDashboardDateFilter(chart.dataConfig, this.config.lark.snapshotField, chart.snapshotDate),
-        });
-        return this.saveProposal(proposal, context);
-      }
-      case "propose_text_component_create": {
-        const proposal = this.tools.validateProposal({
-          action: "create", name: String(args.name), type: "text", dataConfig: { text: String(args.text) },
-        });
-        return this.saveProposal(proposal, context);
-      }
-      case "propose_component_update": {
-        const proposal = this.tools.validateProposal({
-          action: "update", blockId: String(args.block_id),
-          name: args.name === null ? undefined : String(args.name),
-          dataConfig: args.data_config_json === null ? undefined : addDashboardDateFilter(JSON.parse(String(args.data_config_json)) as Record<string, unknown>, this.config.lark.snapshotField, String(args.snapshot_date)),
-        });
-        return this.saveProposal(proposal, context);
-      }
+      case "propose_dashboard_component_create":
+        return requireActionService(this.actionService).proposeDashboardCreate(actionContext(context), args);
+      case "propose_dashboard_component_update":
+        return requireActionService(this.actionService).proposeDashboardUpdate(actionContext(context), args);
+      case "propose_document_create":
+        return requireActionService(this.actionService).proposeDocumentCreate(actionContext(context), args);
+      case "propose_document_append":
+        return requireActionService(this.actionService).proposeDocumentAppend(actionContext(context), args);
+      case "propose_document_replace":
+        return requireActionService(this.actionService).proposeDocumentReplace(actionContext(context), args);
       default: throw new Error(`Unsupported tool: ${name}`);
     }
-  }
-
-  private async saveProposal(proposal: ComponentProposal, context: AgentRunContext): Promise<unknown> {
-    const action: PendingAction = {
-      id: `pa_${randomUUID()}`,
-      requesterId: context.event.sender_id,
-      chatId: context.event.chat_id,
-      rootMessageId: context.event.root_id ?? context.event.message_id,
-      threadId: context.conversationKey,
-      expiresAt: Date.now() + 10 * 60_000,
-      kind: proposal.action === "create" ? "component.create" : "component.update",
-      payload: proposal,
-    };
-    this.state.createPendingAction(action);
-    let approvalCardSent = true;
-    try { await this.tools.sendApprovalCard(action); }
-    catch { approvalCardSent = false; }
-    return {
-      ok: true, proposal_id: action.id, expires_in_minutes: 10, proposal,
-      approval_card_sent: approvalCardSent,
-      confirmation: approvalCardSent ? "请在审批卡片中点击“确认执行”或“取消”。" : "审批卡片发送失败，请在同一聊天中回复：确认",
-    };
   }
 }
 
@@ -476,6 +425,21 @@ function requireSourceReader(reader: SourceReader | undefined): SourceReader {
 function requireBaseResource(resource: BaseResource | undefined): BaseResource {
   if (!resource) throw new Error("Base resource reader is not configured");
   return resource;
+}
+
+function requireActionService(service: ActionService | undefined): ActionService {
+  if (!service) throw new Error("Action proposal service is not configured");
+  return service;
+}
+
+function actionContext(context: AgentRunContext) {
+  return {
+    requesterId: context.event.sender_id,
+    chatId: context.event.chat_id,
+    rootMessageId: context.event.root_id ?? context.event.message_id,
+    threadId: context.conversationKey,
+    sources: context.sources,
+  };
 }
 
 export function addDashboardDateFilter(config: Record<string, unknown>, snapshotField: string, snapshotDate: string): Record<string, unknown> {

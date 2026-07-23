@@ -99,6 +99,29 @@ describe("Lark source reader", () => {
     expect(result).toMatchObject({ content: "1234", truncated: true, complete: false });
   });
 
+  test("logs only source-read metadata, never fetched content", async () => {
+    const writes: string[] = [];
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(((chunk: string) => {
+      writes.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write);
+    try {
+      const cli = { runRetryable: vi.fn(async () => ({ annotated_csv: "机密收入,987654" })) };
+      await new SourceReader(cli as never).readSheet(
+        linkedSources().require("src_sheet"),
+        { sheet_id: "s1", range: "A1:B2" },
+        new SourceBudget(),
+      );
+    } finally {
+      stdout.mockRestore();
+    }
+    const log = writes.join("");
+    expect(log).toContain('"type":"source.read"');
+    expect(log).toContain('"returned_characters":11');
+    expect(log).not.toContain("机密收入");
+    expect(log).not.toContain("987654");
+  });
+
   test("resolves a Wiki sheet after a document type mismatch", async () => {
     const cli = {
       runRetryable: vi.fn()

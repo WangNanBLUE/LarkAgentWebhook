@@ -28,6 +28,8 @@ export interface CardActionEvent {
   action_value: string;
 }
 
+import type { FrozenAction, FrozenActionKind } from "./actions/types.js";
+
 export interface PendingAction {
   id: string;
   requesterId: string;
@@ -35,11 +37,13 @@ export interface PendingAction {
   rootMessageId: string;
   threadId?: string;
   expiresAt: number;
-  kind: "component.create" | "component.update";
-  payload: unknown;
+  kind: FrozenActionKind;
+  payload: FrozenAction;
 }
 
-export type ComponentType = "statistics" | "column" | "line" | "pie" | "ring" | "text";
+export type ComponentType =
+  | "statistics" | "column" | "bar" | "line" | "pie" | "ring" | "area"
+  | "combo" | "scatter" | "funnel" | "wordCloud" | "radar" | "text";
 
 export type ComponentProposal = {
   action: "create";
