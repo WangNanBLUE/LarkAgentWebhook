@@ -1,7 +1,7 @@
 import type { AgentRunner, AgentRunContext } from "../agent/runner.js";
 import type { AppConfig } from "../config.js";
 import type { BaseTools } from "../lark/base-tools.js";
-import type { StreamingCardKit, StreamingCardSession } from "../lark/cardkit.js";
+import type { StreamingCardKit, StreamingCardSession, StreamingCardStatus } from "../lark/cardkit.js";
 import type { StateStore } from "../state/store.js";
 import { SourceBudget } from "../sources/budget.js";
 import { SourceRegistry } from "../sources/registry.js";
@@ -137,7 +137,7 @@ export class MessageService {
     try {
       const answer = await this.agent.run(context, {
         onTextDelta: (delta) => session.appendText(delta),
-        onToolStart: () => session.setStatus("querying"),
+        onToolStart: (name) => session.setStatus(statusForTool(name)),
         onToolEnd: () => session.setStatus("summarizing"),
       });
       if (!await session.finish(answer)) {
@@ -182,4 +182,13 @@ export class MessageService {
       content: replyContent,
     });
   }
+}
+
+function statusForTool(name: string): StreamingCardStatus {
+  if (name.includes("document")) return name.startsWith("propose_") ? "preparing_change" : "reading_document";
+  if (name.includes("sheet")) return "reading_sheet";
+  if (name.includes("base") || name.includes("dashboard")) {
+    return name.startsWith("propose_") ? "preparing_change" : "querying_base";
+  }
+  return "querying";
 }

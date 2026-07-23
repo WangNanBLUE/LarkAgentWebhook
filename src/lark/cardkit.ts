@@ -10,7 +10,11 @@ export const ANSWER_PREFIX = "\u200b";
 const FLUSH_INTERVAL_MS = 250;
 const STATUS_TEXT = {
   analyzing: "正在分析",
-  querying: "正在查询看板数据",
+  querying: "正在处理数据",
+  reading_document: "正在读取文档",
+  reading_sheet: "正在读取电子表格",
+  querying_base: "正在查询多维表格",
+  preparing_change: "正在准备变更预览",
   summarizing: "正在整理分析结果",
 } as const;
 

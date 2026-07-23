@@ -101,7 +101,7 @@ describe("CardKit streaming", () => {
 
     expect(contentWrites).toHaveLength(3);
     expect(contentWrites.map((write) => write.body.sequence)).toEqual([1, 2, 3]);
-    expect(contentWrites[0]?.body.content).toBe("正在查询看板数据");
+    expect(contentWrites[0]?.body.content).toBe("正在处理数据");
     expect(contentWrites[1]?.body.content).toBe(`${ANSWER_PREFIX}分析完成`);
     expect(contentWrites[2]?.body.content).toBe("分析完成");
     expect(settingsWrite?.method).toBe("PATCH");

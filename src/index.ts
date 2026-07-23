@@ -2,9 +2,11 @@ import { AgentRunner } from "./agent/runner.js";
 import { loadConfig } from "./config.js";
 import { startHealthServer, type HealthState } from "./health.js";
 import { BaseTools } from "./lark/base-tools.js";
+import { BaseResource } from "./lark/base-resource.js";
 import { StreamingCardKit } from "./lark/cardkit.js";
 import { LarkCli } from "./lark/cli.js";
 import { EventConsumer } from "./lark/event-consumer.js";
+import { SourceReader } from "./lark/source-reader.js";
 import { MessageService } from "./service/message-service.js";
 import { ApprovalService } from "./service/approval-service.js";
 import { StateStore } from "./state/store.js";
@@ -15,6 +17,8 @@ async function main(): Promise<void> {
   const stateStore = new StateStore(config.statePath);
   const cli = new LarkCli(config.lark.binary);
   const baseTools = new BaseTools(cli, config, stateStore);
+  const sourceReader = new SourceReader(cli);
+  const baseResource = new BaseResource(cli);
   const health: HealthState = {
     startedAt: new Date().toISOString(),
     eventReady: false,
@@ -33,7 +37,7 @@ async function main(): Promise<void> {
   health.feishuReady = true;
   const healthServer = startHealthServer(config.health.host, config.health.port, health);
 
-  const agent = new AgentRunner(config, baseTools, stateStore);
+  const agent = new AgentRunner(config, baseTools, stateStore, undefined, sourceReader, baseResource);
   const cards = new StreamingCardKit(cli, baseTools);
   const botIdentity = config.lark.botOpenId || config.lark.botName;
   const service = new MessageService(

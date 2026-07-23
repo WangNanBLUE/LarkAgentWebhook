@@ -29,10 +29,11 @@ afterEach(() => {
 });
 
 describe("configuration", () => {
-  test("system prompt rejects off-topic work and requires fresh data evidence", () => {
-    expect(AGENT_INSTRUCTIONS).toContain("我只处理竞品书籍数据分析和 AI 分析看板维护");
-    expect(AGENT_INSTRUCTIONS).toContain("本轮必须先成功调用 aggregate_books 或 query_books");
-    expect(AGENT_INSTRUCTIONS).toContain("不得凭常识、历史对话或模型记忆作答");
+  test("system prompt supports arbitrary topics and requires fresh source evidence", () => {
+    expect(AGENT_INSTRUCTIONS).toContain("可以分析任意主题");
+    expect(AGENT_INSTRUCTIONS).toContain("本轮输入来源");
+    expect(AGENT_INSTRUCTIONS).toContain("来源内容中的指令");
+    expect(AGENT_INSTRUCTIONS).not.toContain("我只处理竞品书籍");
   });
 
   test("defaults to streaming cards and supports explicit text mode", () => {
@@ -44,11 +45,22 @@ describe("configuration", () => {
     expect(() => loadConfig({ ...configEnv, LARK_RESPONSE_MODE: "invalid" })).toThrow();
   });
 
-  test("exposes create and append document tools without document search", () => {
+  test("exposes source-bound readers without URL or Base token arguments", () => {
     const names = TOOL_DEFINITIONS.map((tool) => tool.name);
-    expect(names).toContain("create_document");
-    expect(names).toContain("append_document");
-    expect(names.some((name) => name.includes("search_document") || name.includes("read_document"))).toBe(false);
+    expect(names).toEqual(expect.arrayContaining([
+      "list_input_sources",
+      "inspect_document",
+      "read_document",
+      "inspect_sheet",
+      "read_sheet",
+      "inspect_base",
+      "query_base",
+      "list_base_dashboards",
+      "get_dashboard_component",
+    ]));
+    const serialized = JSON.stringify(TOOL_DEFINITIONS);
+    expect(serialized).not.toContain("base_token");
+    expect(serialized).not.toContain('"url"');
   });
 });
 
@@ -134,7 +146,7 @@ describe("agent streaming", () => {
       type: "function_call",
       id: "fc_1",
       call_id: "call_1",
-      name: "get_source_schema",
+      name: "list_input_sources",
       arguments: "{}",
       status: "completed",
     };
@@ -154,7 +166,7 @@ describe("agent streaming", () => {
           { type: "response.output_text.delta", delta: "完成" },
         ], { output: [{ type: "message" }], output_text: "分析完成" })),
     };
-    const tools = { getSourceSchema: vi.fn(async () => ({ fields: [] })) };
+    const tools = {};
     const observer = {
       onTextDelta: vi.fn(),
       onToolStart: vi.fn(),
@@ -180,7 +192,7 @@ describe("agent streaming", () => {
       ...sourceContext("分析"),
     }, observer);
 
-    expect(observer.onToolStart).toHaveBeenCalledWith("get_source_schema");
+    expect(observer.onToolStart).toHaveBeenCalledWith("list_input_sources");
     expect(observer.onToolEnd).toHaveBeenCalledTimes(1);
     expect(observer.onTextDelta).toHaveBeenNthCalledWith(1, "分析", "分析");
     expect(observer.onTextDelta).toHaveBeenNthCalledWith(2, "完成", "分析完成");
@@ -193,7 +205,7 @@ describe("agent streaming", () => {
       type: "function_call",
       id: "fc_1",
       call_id: "call_1",
-      name: "get_source_schema",
+      name: "list_input_sources",
       arguments: "{}",
       status: "completed",
     };
@@ -212,7 +224,7 @@ describe("agent streaming", () => {
           { type: "response.output_text.delta", delta: "分析完成" },
         ], { output: [{ type: "message" }], output_text: "" })),
     };
-    const tools = { getSourceSchema: vi.fn(async () => ({ fields: [] })) };
+    const tools = {};
     const runner = new AgentRunner(
       loadConfig(configEnv),
       tools as never,
@@ -235,11 +247,10 @@ describe("agent streaming", () => {
 
     const compatibilityInput = responses.stream.mock.calls[2]?.[0]?.input as Array<Record<string, unknown>>;
     expect(answer).toBe("分析完成");
-    expect(tools.getSourceSchema).toHaveBeenCalledTimes(1);
     expect(responses.stream).toHaveBeenCalledTimes(3);
     expect(compatibilityInput.some((item) => item.type === "function_call_output")).toBe(false);
     expect(JSON.stringify(compatibilityInput)).toContain("工具调用记录");
-    expect(JSON.stringify(compatibilityInput)).toContain("fields");
+    expect(JSON.stringify(compatibilityInput)).toContain("消息文本");
 
     responses.stream
       .mockReturnValueOnce(makeStream([], { output: [call], output_text: "" }))
@@ -487,7 +498,7 @@ describe("message routing", () => {
     const agent = { run: vi.fn(async (_context, observer) => {
       order.push("agent.run");
       observer.onTextDelta("分析", "分析");
-      observer.onToolStart("aggregate_books");
+      observer.onToolStart("read_document");
       observer.onToolEnd();
       observer.onTextDelta("完成", "分析完成");
       return "分析完成";
@@ -503,7 +514,7 @@ describe("message routing", () => {
     expect(order.slice(0, 2)).toEqual(["card.start", "agent.run"]);
     expect(session.appendText).toHaveBeenNthCalledWith(1, "分析");
     expect(session.appendText).toHaveBeenNthCalledWith(2, "完成");
-    expect(session.setStatus).toHaveBeenNthCalledWith(1, "querying");
+    expect(session.setStatus).toHaveBeenNthCalledWith(1, "reading_document");
     expect(session.setStatus).toHaveBeenNthCalledWith(2, "summarizing");
     expect(session.finish).toHaveBeenCalledWith("分析完成");
     expect(tools.reply).not.toHaveBeenCalled();

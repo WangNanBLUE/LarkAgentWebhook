@@ -4,9 +4,11 @@ import type { Responses } from "openai/resources/responses/responses";
 import { z } from "zod";
 import type { AppConfig } from "../config.js";
 import { parseShanghaiDate } from "../date.js";
+import { BaseResource } from "../lark/base-resource.js";
 import type { ComponentProposal, ComponentType, MessageEvent, PendingAction } from "../types.js";
 import { StateStore } from "../state/store.js";
 import { BaseTools } from "../lark/base-tools.js";
+import { SourceReader } from "../lark/source-reader.js";
 import type { SourceBudget } from "../sources/budget.js";
 import type { SourceRegistry } from "../sources/registry.js";
 import { AGENT_INSTRUCTIONS } from "./instructions.js";
@@ -110,6 +112,20 @@ const documentAppendArgsSchema = z.object({
   content_xml: z.string().min(1).max(100_000),
 }).strict();
 
+const documentReadToolSchema = z.object({
+  source_id: z.string().min(1),
+  mode: z.enum(["keyword", "section", "range", "full"]),
+  keyword: z.string().nullable(),
+  start_block_id: z.string().nullable(),
+  end_block_id: z.string().nullable(),
+}).strict();
+
+const sheetReadToolSchema = z.object({
+  source_id: z.string().min(1),
+  sheet_id: z.string().min(1),
+  range: z.string().min(1),
+}).strict();
+
 export function buildChartComponentConfig(raw: unknown): {
   name: string;
   type: Exclude<ComponentType, "text">;
@@ -161,6 +177,8 @@ export class AgentRunner {
     private readonly tools: BaseTools,
     private readonly state: StateStore,
     responses?: ResponsesClient,
+    private readonly sourceReader?: SourceReader,
+    private readonly baseResource?: BaseResource,
   ) {
     this.responses = responses ?? new OpenAI({ baseURL: config.openai.baseURL, apiKey: config.openai.apiKey }).responses;
   }
@@ -279,14 +297,100 @@ export class AgentRunner {
 
   private async executeTool(name: string, args: Record<string, unknown>, context: AgentRunContext): Promise<unknown> {
     switch (name) {
-      case "get_source_schema": return this.tools.getSourceSchema();
-      case "resolve_snapshot_date": return this.tools.resolveSnapshotDate(args.requested_date as string | null);
-      case "aggregate_books": return this.tools.dataQuery(buildAggregateQuery(args), String(args.snapshot_date));
-      case "query_books": return this.tools.searchRecords({
-        keyword: String(args.keyword), searchFields: args.search_fields as string[], selectFields: args.select_fields as string[], limit: Number(args.limit), snapshotDate: String(args.snapshot_date),
-      });
-      case "list_managed_components": return this.tools.listManagedComponents();
-      case "get_managed_component": return this.tools.getManagedComponent(String(args.block_id));
+      case "list_input_sources":
+        return context.sources.list();
+      case "inspect_document": {
+        const source = context.sources.require(String(args.source_id));
+        return source.kind === "wiki"
+          ? requireSourceReader(this.sourceReader).resolveWiki(source, context.budget)
+          : requireSourceReader(this.sourceReader).inspectDocument(source, context.budget);
+      }
+      case "read_document": {
+        const input = documentReadToolSchema.parse(args);
+        const source = context.sources.require(input.source_id);
+        const reader = requireSourceReader(this.sourceReader);
+        if (input.mode === "keyword") {
+          if (!input.keyword) throw new Error("keyword mode requires keyword");
+          return reader.readDocument(source, { mode: "keyword", keyword: input.keyword }, context.budget);
+        }
+        if (input.mode === "section") {
+          if (!input.start_block_id) throw new Error("section mode requires start_block_id");
+          return reader.readDocument(source, { mode: "section", start_block_id: input.start_block_id }, context.budget);
+        }
+        if (input.mode === "range") {
+          return reader.readDocument(source, {
+            mode: "range",
+            ...(input.start_block_id ? { start_block_id: input.start_block_id } : {}),
+            ...(input.end_block_id ? { end_block_id: input.end_block_id } : {}),
+          }, context.budget);
+        }
+        return reader.readDocument(source, { mode: "full" }, context.budget);
+      }
+      case "inspect_sheet": {
+        const source = context.sources.require(String(args.source_id));
+        return requireSourceReader(this.sourceReader).inspectSheet(source);
+      }
+      case "read_sheet": {
+        const input = sheetReadToolSchema.parse(args);
+        const source = context.sources.require(input.source_id);
+        return requireSourceReader(this.sourceReader).readSheet(source, {
+          sheet_id: input.sheet_id,
+          range: input.range,
+        }, context.budget);
+      }
+      case "inspect_base": {
+        const source = context.sources.require(String(args.source_id));
+        const base = requireBaseResource(this.baseResource);
+        const location = await base.resolve(source);
+        const [blocks, tables] = await Promise.all([base.listBlocks(location), base.listTables(location)]);
+        const tableId = args.table_id === null || args.table_id === undefined ? undefined : String(args.table_id);
+        const fields = tableId ? await base.fields(location, tableId) : undefined;
+        return {
+          source_id: source.id,
+          source_type: "base",
+          title: source.title,
+          default_table_id: location.tableId ?? null,
+          blocks,
+          tables,
+          ...(fields ? { fields } : {}),
+        };
+      }
+      case "query_base": {
+        const source = context.sources.require(String(args.source_id));
+        const base = requireBaseResource(this.baseResource);
+        const location = await base.resolve(source);
+        return base.query(location, source, {
+          table_id: String(args.table_id),
+          dimensions: args.dimensions as never,
+          measures: args.measures as never,
+          filters: (args.filters as Array<Record<string, unknown>>).map((filter) => (
+            filter.value === null
+              ? { field_name: String(filter.field_name), operator: filter.operator as never }
+              : filter as never
+          )),
+          filter_conjunction: args.filter_conjunction as "and" | "or",
+          sort: args.sort as never,
+          limit: Number(args.limit),
+        }, context.budget);
+      }
+      case "list_base_dashboards": {
+        const source = context.sources.require(String(args.source_id));
+        const base = requireBaseResource(this.baseResource);
+        const location = await base.resolve(source);
+        const dashboards = await base.listDashboards(location);
+        const dashboardId = args.dashboard_id === null || args.dashboard_id === undefined ? undefined : String(args.dashboard_id);
+        return {
+          source_id: source.id,
+          dashboards,
+          ...(dashboardId ? { components: await base.listDashboardBlocks(location, dashboardId) } : {}),
+        };
+      }
+      case "get_dashboard_component": {
+        const source = context.sources.require(String(args.source_id));
+        const base = requireBaseResource(this.baseResource);
+        const location = await base.resolve(source);
+        return base.getDashboardBlock(location, String(args.dashboard_id), String(args.block_id));
+      }
       case "create_document": {
         const parsed = documentCreateArgsSchema.parse(args);
         return this.tools.createDocument(parsed.title, parsed.content_xml);
@@ -362,6 +466,16 @@ function buildTextToolContinuation(prompt: string, transcript: ToolTranscriptEnt
 function isUpstream502(error: unknown): boolean {
   const candidate = error as { status?: number; message?: string };
   return candidate?.status === 502 || candidate?.message?.startsWith("502 ") === true;
+}
+
+function requireSourceReader(reader: SourceReader | undefined): SourceReader {
+  if (!reader) throw new Error("Source reader is not configured");
+  return reader;
+}
+
+function requireBaseResource(resource: BaseResource | undefined): BaseResource {
+  if (!resource) throw new Error("Base resource reader is not configured");
+  return resource;
 }
 
 export function addDashboardDateFilter(config: Record<string, unknown>, snapshotField: string, snapshotDate: string): Record<string, unknown> {
