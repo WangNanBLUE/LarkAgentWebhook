@@ -295,6 +295,51 @@ describe("agent streaming", () => {
     expect(cachedCompatibilityInput.some((item) => item.type === "function_call_output")).toBe(false);
     expect(JSON.stringify(cachedCompatibilityInput)).toContain("工具调用记录");
   });
+
+  test("reserves the final response window instead of spending the deadline on more tools", async () => {
+    const call = {
+      type: "function_call",
+      id: "fc_sources",
+      call_id: "call_sources",
+      name: "list_input_sources",
+      arguments: "{}",
+      status: "completed",
+    };
+    const makeStream = (response: unknown) => ({
+      async *[Symbol.asyncIterator]() {
+        yield { type: "response.completed", response };
+      },
+      finalResponse: vi.fn(async () => response),
+    });
+    const responses = {
+      stream: vi.fn()
+        .mockReturnValueOnce(makeStream({ output: [call], output_text: "", status: "completed" }))
+        .mockReturnValueOnce(makeStream({
+          output: [{ type: "message" }], output_text: "基于已有数据总结", status: "completed",
+        })),
+    };
+    const config = loadConfig(configEnv);
+    Object.assign(config.agent, { timeoutMs: 100, finalResponseReserveMs: 40 });
+    const now = vi.spyOn(Date, "now")
+      .mockReturnValueOnce(0)
+      .mockReturnValueOnce(10)
+      .mockReturnValueOnce(10)
+      .mockReturnValue(70);
+    try {
+      const runner = new AgentRunner(config, {} as never, {} as never, responses as never);
+      await expect(runner.run({
+        event: { message_id: "om_budget", chat_id: "oc_1", sender_id: "ou_1", chat_type: "p2p", content: "分析" },
+        prompt: "分析",
+        conversationKey: "om_budget",
+        ...sourceContext("分析"),
+      })).resolves.toBe("基于已有数据总结");
+    } finally {
+      now.mockRestore();
+    }
+
+    expect(responses.stream).toHaveBeenCalledTimes(2);
+    expect(responses.stream.mock.calls[1]?.[0]).toMatchObject({ tool_choice: "none" });
+  });
 });
 
 describe("CLI failures", () => {

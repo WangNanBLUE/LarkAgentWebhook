@@ -14,6 +14,8 @@ const envSchema = z.object({
   LARK_TABLE_NAME: z.string().min(1).optional(),
   LARK_SNAPSHOT_FIELD: z.string().min(1).optional(),
   LARK_DASHBOARD_NAME: z.string().min(1).optional(),
+  AGENT_TIMEOUT_MS: z.coerce.number().int().min(60_000).max(600_000).default(180_000),
+  AGENT_FINAL_RESPONSE_RESERVE_MS: z.coerce.number().int().min(10_000).max(120_000).default(60_000),
   STATE_PATH: z.string().default("./data/agent.sqlite"),
   HEALTH_HOST: z.string().default("127.0.0.1"),
   HEALTH_PORT: z.coerce.number().int().min(1).max(65535).default(8787),
@@ -44,7 +46,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
         dashboardName: value.LARK_DASHBOARD_NAME ?? "竞品书籍 AI 分析看板",
       } : undefined,
     },
-    agent: { maxToolRounds: 6, timeoutMs: 90_000 },
+    agent: {
+      maxToolRounds: 6,
+      timeoutMs: value.AGENT_TIMEOUT_MS,
+      finalResponseReserveMs: Math.min(value.AGENT_FINAL_RESPONSE_RESERVE_MS, value.AGENT_TIMEOUT_MS - 10_000),
+    },
     statePath: value.STATE_PATH,
     health: { host: value.HEALTH_HOST, port: value.HEALTH_PORT },
   };

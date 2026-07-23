@@ -178,12 +178,14 @@ export class AgentRunner {
     const input: Responses.ResponseInput = [{ role: "user", content: context.prompt }];
     const toolTranscript: ToolTranscriptEntry[] = [];
     const deadline = Date.now() + this.config.agent.timeoutMs;
+    const toolDeadline = deadline - this.config.agent.finalResponseReserveMs;
     let displayedText = "";
     let useTextToolContinuation = this.textToolContinuationRequired;
 
     const requestRound = async (
       instructions: string,
       toolChoice?: "none",
+      requestDeadline = deadline,
     ): Promise<{ response: Responses.Response; roundText: string }> => {
       const params = (): ResponseStreamParams => {
         const textContinuation = useTextToolContinuation && toolTranscript.length > 0;
@@ -199,7 +201,7 @@ export class AgentRunner {
         };
       };
       const stream = async () => {
-        const remaining = deadline - Date.now();
+        const remaining = requestDeadline - Date.now();
         if (remaining <= 0) throw new Error("Agent request timed out");
         return this.streamResponse(params(), remaining, observer, (delta) => {
           displayedText += delta;
@@ -225,7 +227,15 @@ export class AgentRunner {
     };
 
     for (let round = 0; round < this.config.agent.maxToolRounds; round += 1) {
-      const { response, roundText } = await requestRound(AGENT_INSTRUCTIONS);
+      if (Date.now() >= toolDeadline) break;
+      let response: Responses.Response;
+      let roundText: string;
+      try {
+        ({ response, roundText } = await requestRound(AGENT_INSTRUCTIONS, undefined, toolDeadline));
+      } catch (error) {
+        if (isRequestAbort(error) && Date.now() >= toolDeadline) break;
+        throw error;
+      }
 
       const calls = response.output.filter((item): item is Responses.ResponseFunctionToolCall => item.type === "function_call");
       if (calls.length === 0) return response.output_text || roundText || "未生成有效回答。";
@@ -415,6 +425,13 @@ function buildTextToolContinuation(prompt: string, transcript: ToolTranscriptEnt
 function isUpstream502(error: unknown): boolean {
   const candidate = error as { status?: number; message?: string };
   return candidate?.status === 502 || candidate?.message?.startsWith("502 ") === true;
+}
+
+function isRequestAbort(error: unknown): boolean {
+  const candidate = error as { name?: string; message?: string };
+  return candidate?.name === "AbortError"
+    || candidate?.name === "APIUserAbortError"
+    || candidate?.message === "Request was aborted.";
 }
 
 function requireSourceReader(reader: SourceReader | undefined): SourceReader {
