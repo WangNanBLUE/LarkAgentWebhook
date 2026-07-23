@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { classifyCliError } from "../src/lark/errors.js";
 import { StateStore } from "../src/state/store.js";
 import { MessageService, shouldHandleEvent, writeMessageLog } from "../src/service/message-service.js";
-import { AgentRunner, addDashboardDateFilter, buildAggregateQuery } from "../src/agent/runner.js";
+import { AgentRunner, addDashboardDateFilter, buildAggregateQuery, buildChartComponentConfig } from "../src/agent/runner.js";
 import { validateDashboardConfig } from "../src/lark/base-tools.js";
 import { AGENT_INSTRUCTIONS } from "../src/agent/instructions.js";
 import { loadConfig } from "../src/config.js";
@@ -258,6 +258,28 @@ describe("message routing", () => {
     expect(tools.reply).not.toHaveBeenCalled();
   });
 
+  test("claims group confirmations by chat instead of the triggering message", async () => {
+    const event = {
+      message_id: "om_confirm",
+      chat_id: "oc_group",
+      sender_id: "ou_sender",
+      chat_type: "group" as const,
+      content: "@竞品分析 确认",
+      mentions: [{ id: "ou_bot", key: "@_user_1", name: "竞品分析" }],
+    };
+    const state = {
+      markMessageProcessed: vi.fn(() => true),
+      claimPendingAction: vi.fn(() => ({ ok: false, reason: "not_found" })),
+    };
+    const tools = { reply: vi.fn(async () => ({})), sendToChat: vi.fn(async () => ({})) };
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    await new MessageService("ou_bot", state as never, { run: vi.fn() } as never, tools as never).handle(event);
+    write.mockRestore();
+
+    expect(state.claimPendingAction).toHaveBeenCalledWith("ou_sender", "oc_group", "oc_group");
+  });
+
   test("streams a card before running the agent and forwards progress", async () => {
     const order: string[] = [];
     const event = {
@@ -444,6 +466,38 @@ describe("state", () => {
 });
 
 describe("dashboard filters", () => {
+  test("builds a ring chart config from structured arguments", () => {
+    expect(buildChartComponentConfig({
+      name: "按书籍来源分布",
+      component_type: "ring",
+      metric: { kind: "count_all", field_name: null, rollup: null },
+      group_by: [{ field_name: "书籍来源", mode: "enumerated", sort_type: "value", sort_order: "desc" }],
+      filters: [],
+      filter_conjunction: "and",
+      snapshot_date: "2026-07-23",
+    })).toEqual({
+      name: "按书籍来源分布",
+      type: "ring",
+      snapshotDate: "2026-07-23",
+      dataConfig: {
+        count_all: true,
+        group_by: [{ field_name: "书籍来源", mode: "enumerated", sort: { type: "value", order: "desc" } }],
+      },
+    });
+  });
+
+  test("rejects incompatible structured chart arguments", () => {
+    expect(() => buildChartComponentConfig({
+      name: "错误环形图",
+      component_type: "ring",
+      metric: { kind: "count_all", field_name: "阅读量估算", rollup: "SUM" },
+      group_by: [],
+      filters: [],
+      filter_conjunction: "and",
+      snapshot_date: "2026-07-23",
+    })).toThrow();
+  });
+
   test("uses numeric milliseconds for dashboard datetime filters", () => {
     const result = addDashboardDateFilter({ count_all: true }, "快照日期", "2026-07-22");
     const filter = result.filter as { conditions: Array<{ value: unknown }> };

@@ -52,6 +52,81 @@ const aggregateArgsSchema = z.object({
   }
 });
 
+const chartCreateArgsSchema = z.object({
+  name: z.string().min(1).max(100),
+  component_type: z.enum(["statistics", "column", "line", "pie", "ring"]),
+  metric: z.object({
+    kind: z.enum(["count_all", "field"]),
+    field_name: z.string().min(1).nullable(),
+    rollup: z.enum(["SUM", "MAX", "MIN", "AVERAGE"]).nullable(),
+  }).strict(),
+  group_by: z.array(z.object({
+    field_name: z.string().min(1),
+    mode: z.enum(["integrated", "enumerated"]),
+    sort_type: z.enum(["group", "value", "view"]).nullable(),
+    sort_order: z.enum(["asc", "desc"]).nullable(),
+  }).strict()).max(2),
+  filters: z.array(z.object({
+    field_name: z.string().min(1),
+    operator: z.enum(["is", "isNot", "contains", "doesNotContain", "isEmpty", "isNotEmpty", "isGreater", "isGreaterEqual", "isLess", "isLessEqual"]),
+    value: z.union([z.string(), z.number(), z.boolean(), z.array(z.string())]).nullable(),
+  }).strict()).max(10),
+  filter_conjunction: z.enum(["and", "or"]),
+  snapshot_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+}).superRefine((value, context) => {
+  const expectedGroups = value.component_type === "statistics" ? 0 : value.component_type === "pie" || value.component_type === "ring" ? 1 : undefined;
+  if (expectedGroups !== undefined && value.group_by.length !== expectedGroups) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["group_by"], message: `${value.component_type} requires exactly ${expectedGroups} group fields` });
+  } else if (expectedGroups === undefined && value.group_by.length === 0) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["group_by"], message: `${value.component_type} requires at least one group field` });
+  }
+  if (value.metric.kind === "count_all" && (value.metric.field_name !== null || value.metric.rollup !== null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["metric"], message: "count_all metric must not include field_name or rollup" });
+  }
+  if (value.metric.kind === "field" && (value.metric.field_name === null || value.metric.rollup === null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["metric"], message: "field metric requires field_name and rollup" });
+  }
+  for (const [index, group] of value.group_by.entries()) {
+    if (group.sort_type === null && group.sort_order !== null) context.addIssue({ code: z.ZodIssueCode.custom, path: ["group_by", index], message: "sort_order requires sort_type" });
+    if (group.sort_type === "value" && group.sort_order === null) context.addIssue({ code: z.ZodIssueCode.custom, path: ["group_by", index], message: "value sort requires sort_order" });
+  }
+  for (const [index, filter] of value.filters.entries()) {
+    const empty = filter.operator === "isEmpty" || filter.operator === "isNotEmpty";
+    if (empty !== (filter.value === null)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["filters", index, "value"], message: empty ? "empty operator requires null value" : "filter requires a value" });
+  }
+});
+
+export function buildChartComponentConfig(raw: unknown): {
+  name: string;
+  type: Exclude<ComponentType, "text">;
+  snapshotDate: string;
+  dataConfig: Record<string, unknown>;
+} {
+  const parsed = chartCreateArgsSchema.parse(raw);
+  const groupBy = parsed.group_by.map((group) => ({
+    field_name: group.field_name,
+    mode: group.mode,
+    ...(group.sort_type ? { sort: { type: group.sort_type, order: group.sort_order ?? "asc" } } : {}),
+  }));
+  const conditions = parsed.filters.map((filter) => ({
+    field_name: filter.field_name,
+    operator: filter.operator,
+    ...(filter.value === null ? {} : { value: filter.value }),
+  }));
+  return {
+    name: parsed.name,
+    type: parsed.component_type,
+    snapshotDate: parsed.snapshot_date,
+    dataConfig: {
+      ...(parsed.metric.kind === "count_all"
+        ? { count_all: true }
+        : { series: [{ field_name: parsed.metric.field_name, rollup: parsed.metric.rollup }] }),
+      ...(groupBy.length ? { group_by: groupBy } : {}),
+      ...(conditions.length ? { filter: { conjunction: parsed.filter_conjunction, conditions } } : {}),
+    },
+  };
+}
+
 export function buildAggregateQuery(raw: unknown): Record<string, unknown> {
   const parsed = aggregateArgsSchema.parse(raw);
   return {
@@ -186,10 +261,17 @@ export class AgentRunner {
       });
       case "list_managed_components": return this.tools.listManagedComponents();
       case "get_managed_component": return this.tools.getManagedComponent(String(args.block_id));
-      case "propose_component_create": {
+      case "propose_chart_component_create": {
+        const chart = buildChartComponentConfig(args);
         const proposal = this.tools.validateProposal({
-          action: "create", name: String(args.name), type: String(args.component_type) as ComponentType,
-          dataConfig: addDashboardDateFilter(JSON.parse(String(args.data_config_json)) as Record<string, unknown>, this.config.lark.snapshotField, String(args.snapshot_date)),
+          action: "create", name: chart.name, type: chart.type,
+          dataConfig: addDashboardDateFilter(chart.dataConfig, this.config.lark.snapshotField, chart.snapshotDate),
+        });
+        return this.saveProposal(proposal, context);
+      }
+      case "propose_text_component_create": {
+        const proposal = this.tools.validateProposal({
+          action: "create", name: String(args.name), type: "text", dataConfig: { text: String(args.text) },
         });
         return this.saveProposal(proposal, context);
       }
@@ -217,7 +299,7 @@ export class AgentRunner {
       payload: proposal,
     };
     this.state.createPendingAction(action);
-    return { ok: true, proposal_id: action.id, expires_in_minutes: 10, proposal, confirmation: "请在同一话题中 @竞品分析 回复：确认" };
+    return { ok: true, proposal_id: action.id, expires_in_minutes: 10, proposal, confirmation: "请在同一会话中 @竞品分析 回复：确认" };
   }
 }
 

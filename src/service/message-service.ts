@@ -46,7 +46,7 @@ export class MessageService {
     if (!this.state.markMessageProcessed(event.message_id)) return;
 
     const prompt = stripBotMention(event, this.botIdentity);
-    const conversationKey = event.root_id ?? event.reply_to ?? event.message_id;
+    const conversationKey = event.thread_id ?? event.root_id ?? event.reply_to ?? event.chat_id;
     try {
       if (prompt === "确认") {
         const claimed = this.state.claimPendingAction(event.sender_id, event.chat_id, conversationKey);

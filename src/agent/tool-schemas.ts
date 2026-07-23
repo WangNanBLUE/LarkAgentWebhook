@@ -22,6 +22,25 @@ const sort = object({
   field_name: { type: "string", description: "真实字段名或 measure alias" },
   order: { type: "string", enum: ["asc", "desc"] },
 }, ["field_name", "order"]);
+const chartMetric = object({
+  kind: { type: "string", enum: ["count_all", "field"], description: "统计记录数用 count_all；聚合数值字段用 field" },
+  field_name: { type: ["string", "null"], description: "kind=field 时为真实数值字段名，否则为 null" },
+  rollup: { type: ["string", "null"], enum: ["SUM", "MAX", "MIN", "AVERAGE", null] },
+}, ["kind", "field_name", "rollup"]);
+const chartGroup = object({
+  field_name: { type: "string", description: "真实分组字段名" },
+  mode: { type: "string", enum: ["integrated", "enumerated"], description: "文本、单选、日期等单值字段用 integrated；多选、人员等多值字段用 enumerated" },
+  sort_type: { type: ["string", "null"], enum: ["group", "value", "view", null] },
+  sort_order: { type: ["string", "null"], enum: ["asc", "desc", null] },
+}, ["field_name", "mode", "sort_type", "sort_order"]);
+const chartFilter = object({
+  field_name: { type: "string" },
+  operator: { type: "string", enum: ["is", "isNot", "contains", "doesNotContain", "isEmpty", "isNotEmpty", "isGreater", "isGreaterEqual", "isLess", "isLessEqual"] },
+  value: { anyOf: [
+    { type: "string" }, { type: "number" }, { type: "boolean" },
+    { type: "array", items: { type: "string" } }, { type: "null" },
+  ], description: "isEmpty/isNotEmpty 时为 null，其他操作符传真实字段值" },
+}, ["field_name", "operator", "value"]);
 
 export const TOOL_DEFINITIONS: Responses.FunctionTool[] = [
   {
@@ -63,13 +82,23 @@ export const TOOL_DEFINITIONS: Responses.FunctionTool[] = [
     strict: true, parameters: object({ block_id: { type: "string" } }, ["block_id"]),
   },
   {
-    type: "function", name: "propose_component_create", description: "生成新增组件预览并等待用户确认，不立即写入。",
+    type: "function", name: "propose_chart_component_create", description: "用结构化参数生成图表组件预览并等待用户确认。不要构造 data_config JSON。",
     strict: true, parameters: object({
       name: { type: "string" },
-      component_type: { type: "string", enum: ["statistics", "column", "line", "pie", "ring", "text"] },
-      data_config_json: { type: "string", description: "符合 lark-base dashboard data_config 规范的 JSON" },
+      component_type: { type: "string", enum: ["statistics", "column", "line", "pie", "ring"] },
+      metric: chartMetric,
+      group_by: { type: "array", items: chartGroup, maxItems: 2, description: "statistics 传空数组；pie/ring 恰好一项；column/line 为 1-2 项" },
+      filters: { type: "array", items: chartFilter, maxItems: 10, description: "额外筛选条件；快照日期由服务自动添加" },
+      filter_conjunction: { type: "string", enum: ["and", "or"] },
       snapshot_date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
-    }, ["name", "component_type", "data_config_json", "snapshot_date"]),
+    }, ["name", "component_type", "metric", "group_by", "filters", "filter_conjunction", "snapshot_date"]),
+  },
+  {
+    type: "function", name: "propose_text_component_create", description: "生成 Markdown 文本组件预览并等待用户确认。",
+    strict: true, parameters: object({
+      name: { type: "string" },
+      text: { type: "string" },
+    }, ["name", "text"]),
   },
   {
     type: "function", name: "propose_component_update", description: "生成修改服务托管组件的预览并等待用户确认，不立即写入。",
