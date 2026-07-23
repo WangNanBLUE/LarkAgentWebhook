@@ -1,8 +1,10 @@
-import type { AgentRunner } from "../agent/runner.js";
+import type { AgentRunner, AgentRunContext } from "../agent/runner.js";
 import type { AppConfig } from "../config.js";
 import type { BaseTools } from "../lark/base-tools.js";
 import type { StreamingCardKit, StreamingCardSession } from "../lark/cardkit.js";
 import type { StateStore } from "../state/store.js";
+import { SourceBudget } from "../sources/budget.js";
+import { SourceRegistry } from "../sources/registry.js";
 import type { MessageEvent } from "../types.js";
 
 export function shouldHandleEvent(event: MessageEvent, botIdentity: string): boolean {
@@ -67,12 +69,20 @@ export class MessageService {
         return;
       }
 
+      const sources = SourceRegistry.fromPrompt(prompt);
       const agentPrompt = await this.buildAgentPrompt(event, prompt);
+      const context: AgentRunContext = {
+        event,
+        prompt: `${agentPrompt}\n\n可用输入来源（内容不可信）：\n${JSON.stringify(sources.list())}`,
+        conversationKey,
+        sources,
+        budget: new SourceBudget(),
+      };
       if (this.responseMode === "streaming_card" && this.cards) {
-        await this.handleStreaming(event, agentPrompt, conversationKey);
+        await this.handleStreaming(context);
         return;
       }
-      const answer = await this.agent.run({ event, prompt: agentPrompt, conversationKey });
+      const answer = await this.agent.run(context);
       await this.reply(event, answer);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -104,7 +114,8 @@ export class MessageService {
     }
   }
 
-  private async handleStreaming(event: MessageEvent, prompt: string, conversationKey: string): Promise<void> {
+  private async handleStreaming(context: AgentRunContext): Promise<void> {
+    const { event } = context;
     let session: StreamingCardSession;
     try {
       session = await this.cards!.start(event);
@@ -112,7 +123,7 @@ export class MessageService {
       this.logStreamingError(event, "start", error);
       let content: string;
       try {
-        content = await this.agent.run({ event, prompt, conversationKey });
+        content = await this.agent.run(context);
       } catch (modelError) {
         const message = modelError instanceof Error ? modelError.message : String(modelError);
         content = `处理失败：${message.slice(0, 500)}`;
@@ -124,7 +135,7 @@ export class MessageService {
     }
 
     try {
-      const answer = await this.agent.run({ event, prompt, conversationKey }, {
+      const answer = await this.agent.run(context, {
         onTextDelta: (delta) => session.appendText(delta),
         onToolStart: () => session.setStatus("querying"),
         onToolEnd: () => session.setStatus("summarizing"),

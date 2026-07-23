@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { SourceBudget } from "../src/sources/budget.js";
 import { SourceRegistry } from "../src/sources/registry.js";
 
 function ids(...values: string[]): () => string {
@@ -51,5 +52,13 @@ describe("source registry", () => {
 
   test("rejects text sources over the configured limit", () => {
     expect(() => SourceRegistry.fromPrompt("x".repeat(20_001))).toThrow("20000");
+  });
+
+  test("enforces per-source and per-request output budgets", () => {
+    const budget = new SourceBudget(10, 15);
+
+    expect(budget.take("src_1", "123456789012")).toEqual({ text: "1234567890", truncated: true });
+    expect(budget.take("src_2", "abcdefghij")).toEqual({ text: "abcde", truncated: true });
+    expect(budget.take("src_1", "more")).toEqual({ text: "", truncated: true });
   });
 });

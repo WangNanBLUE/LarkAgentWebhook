@@ -3,10 +3,13 @@ import { classifyCliError } from "../src/lark/errors.js";
 import { StateStore } from "../src/state/store.js";
 import { MessageService, shouldHandleEvent, writeMessageLog } from "../src/service/message-service.js";
 import { AgentRunner, addDashboardDateFilter, buildAggregateQuery, buildChartComponentConfig } from "../src/agent/runner.js";
+import type { AgentRunContext } from "../src/agent/runner.js";
 import { BaseTools, validateDashboardConfig } from "../src/lark/base-tools.js";
 import { AGENT_INSTRUCTIONS } from "../src/agent/instructions.js";
 import { TOOL_DEFINITIONS } from "../src/agent/tool-schemas.js";
 import { loadConfig } from "../src/config.js";
+import { SourceBudget } from "../src/sources/budget.js";
+import { SourceRegistry } from "../src/sources/registry.js";
 
 const stores: StateStore[] = [];
 
@@ -16,6 +19,10 @@ const configEnv = {
   OPENAI_MODEL: "test-model",
   LARK_EXPECTED_APP_ID: "cli_test",
 };
+
+function sourceContext(prompt: string): Pick<AgentRunContext, "sources" | "budget"> {
+  return { sources: SourceRegistry.fromPrompt(prompt), budget: new SourceBudget() };
+}
 
 afterEach(() => {
   for (const store of stores.splice(0)) store.close();
@@ -79,6 +86,7 @@ describe("agent streaming", () => {
       event: { message_id: "om_doc", chat_id: "oc_1", sender_id: "ou_1", chat_type: "p2p", content: "创建文档" },
       prompt: "创建文档",
       conversationKey: "om_doc",
+      ...sourceContext("创建文档"),
     });
 
     expect(tools.createDocument).toHaveBeenCalledWith("竞品分析", "<p>分析内容</p>");
@@ -117,6 +125,7 @@ describe("agent streaming", () => {
       },
       prompt: "比较两本书",
       conversationKey: "om_incomplete",
+      ...sourceContext("比较两本书"),
     })).rejects.toThrow("Agent response incomplete: max_output_tokens");
   });
 
@@ -168,6 +177,7 @@ describe("agent streaming", () => {
       },
       prompt: "分析",
       conversationKey: "om_1",
+      ...sourceContext("分析"),
     }, observer);
 
     expect(observer.onToolStart).toHaveBeenCalledWith("get_source_schema");
@@ -220,6 +230,7 @@ describe("agent streaming", () => {
       },
       prompt: "分析",
       conversationKey: "om_compat",
+      ...sourceContext("分析"),
     });
 
     const compatibilityInput = responses.stream.mock.calls[2]?.[0]?.input as Array<Record<string, unknown>>;
@@ -246,6 +257,7 @@ describe("agent streaming", () => {
       },
       prompt: "再次分析",
       conversationKey: "om_compat_2",
+      ...sourceContext("再次分析"),
     });
     const cachedCompatibilityInput = responses.stream.mock.calls[4]?.[0]?.input as Array<Record<string, unknown>>;
 
@@ -304,9 +316,12 @@ describe("message routing", () => {
       reply_to: "om_parent",
     };
     const state = { markMessageProcessed: vi.fn(() => true) };
-    const agent = { run: vi.fn(async (_context: { prompt: string }) => "因为阅读量更高。") };
+    const agent = { run: vi.fn(async (_context: AgentRunContext) => "因为阅读量更高。") };
     const tools = {
-      getMessageContext: vi.fn(async () => ({ content: "建议选择 The Charismatic Charlie Wade。", senderName: "竞品分析" })),
+      getMessageContext: vi.fn(async () => ({
+        content: "参考资料：https://example.feishu.cn/base/should_not_be_authorized",
+        senderName: "竞品分析",
+      })),
       reply: vi.fn(async () => ({})),
       sendToChat: vi.fn(async () => ({})),
     };
@@ -317,9 +332,13 @@ describe("message routing", () => {
 
     expect(tools.getMessageContext).toHaveBeenCalledWith("om_parent");
     expect(agent.run).toHaveBeenCalledWith(expect.objectContaining({
-      prompt: expect.stringContaining("建议选择 The Charismatic Charlie Wade。"),
+      prompt: expect.stringContaining("should_not_be_authorized"),
     }));
     expect(agent.run.mock.calls[0]?.[0].prompt).toContain("当前消息：\n为什么？");
+    expect(agent.run.mock.calls[0]?.[0].sources.list()).toEqual([
+      expect.objectContaining({ kind: "text" }),
+    ]);
+    expect(agent.run.mock.calls[0]?.[0].budget).toBeDefined();
   });
 
   test("fetches referenced message content through the bot IM API", async () => {

@@ -7,13 +7,17 @@ import { parseShanghaiDate } from "../date.js";
 import type { ComponentProposal, ComponentType, MessageEvent, PendingAction } from "../types.js";
 import { StateStore } from "../state/store.js";
 import { BaseTools } from "../lark/base-tools.js";
+import type { SourceBudget } from "../sources/budget.js";
+import type { SourceRegistry } from "../sources/registry.js";
 import { AGENT_INSTRUCTIONS } from "./instructions.js";
 import { TOOL_DEFINITIONS } from "./tool-schemas.js";
 
-interface RunContext {
+export interface AgentRunContext {
   event: MessageEvent;
   prompt: string;
   conversationKey: string;
+  sources: SourceRegistry;
+  budget: SourceBudget;
 }
 
 export interface AgentRunObserver {
@@ -161,7 +165,7 @@ export class AgentRunner {
     this.responses = responses ?? new OpenAI({ baseURL: config.openai.baseURL, apiKey: config.openai.apiKey }).responses;
   }
 
-  async run(context: RunContext, observer?: AgentRunObserver): Promise<string> {
+  async run(context: AgentRunContext, observer?: AgentRunObserver): Promise<string> {
     const input: Responses.ResponseInput = [{ role: "user", content: context.prompt }];
     const toolTranscript: ToolTranscriptEntry[] = [];
     const deadline = Date.now() + this.config.agent.timeoutMs;
@@ -273,7 +277,7 @@ export class AgentRunner {
     return { response, roundText };
   }
 
-  private async executeTool(name: string, args: Record<string, unknown>, context: RunContext): Promise<unknown> {
+  private async executeTool(name: string, args: Record<string, unknown>, context: AgentRunContext): Promise<unknown> {
     switch (name) {
       case "get_source_schema": return this.tools.getSourceSchema();
       case "resolve_snapshot_date": return this.tools.resolveSnapshotDate(args.requested_date as string | null);
@@ -317,7 +321,7 @@ export class AgentRunner {
     }
   }
 
-  private async saveProposal(proposal: ComponentProposal, context: RunContext): Promise<unknown> {
+  private async saveProposal(proposal: ComponentProposal, context: AgentRunContext): Promise<unknown> {
     const action: PendingAction = {
       id: `pa_${randomUUID()}`,
       requesterId: context.event.sender_id,
