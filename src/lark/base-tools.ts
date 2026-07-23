@@ -238,6 +238,15 @@ export class BaseTools {
     return this.cli.runRetryable(args);
   }
 
+  sendToChat(chatId: string, text: string): Promise<unknown> {
+    const body = text.slice(0, 20_000);
+    const key = createHash("sha256").update(`chat:${chatId}:${body}`).digest("hex").slice(0, 48);
+    return this.cli.runRetryable([
+      "im", "+messages-send", "--chat-id", chatId, "--text", body,
+      "--idempotency-key", key, "--as", "bot", "--format", "json",
+    ]);
+  }
+
   replyCard(messageId: string, cardId: string, replyInThread: boolean): Promise<unknown> {
     const content = JSON.stringify({ type: "card", data: { card_id: cardId } });
     const key = createHash("sha256")
@@ -253,6 +262,16 @@ export class BaseTools {
     if (replyInThread) args.push("--reply-in-thread");
     args.push("--idempotency-key", key, "--as", "bot", "--format", "json");
     return this.cli.runRetryable(args);
+  }
+
+  sendCardToChat(chatId: string, cardId: string): Promise<unknown> {
+    const content = JSON.stringify({ type: "card", data: { card_id: cardId } });
+    const key = createHash("sha256").update(`chat:${chatId}:${cardId}`).digest("hex").slice(0, 48);
+    return this.cli.runRetryable([
+      "im", "+messages-send", "--chat-id", chatId,
+      "--msg-type", "interactive", "--content", content,
+      "--idempotency-key", key, "--as", "bot", "--format", "json",
+    ]);
   }
 
   private async listDashboardBlocks(dashboardId: string): Promise<unknown[]> {

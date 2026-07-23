@@ -16,7 +16,8 @@ const STATUS_TEXT = {
 
 export type StreamingCardStatus = keyof typeof STATUS_TEXT;
 
-export function buildStreamingCard(): Record<string, unknown> {
+export function buildStreamingCard(mentionId?: string): Record<string, unknown> {
+  const statusPrefix = mentionId ? `<at id=${mentionId}></at> ` : "";
   return {
     schema: "2.0",
     config: {
@@ -32,7 +33,7 @@ export function buildStreamingCard(): Record<string, unknown> {
     },
     body: {
       elements: [
-        { tag: "markdown", element_id: STATUS_ELEMENT_ID, content: STATUS_TEXT.analyzing },
+        { tag: "markdown", element_id: STATUS_ELEMENT_ID, content: `${statusPrefix}${STATUS_TEXT.analyzing}` },
         { tag: "markdown", element_id: ANSWER_ELEMENT_ID, content: ANSWER_PREFIX },
       ],
     },
@@ -43,15 +44,17 @@ export class StreamingCardKit {
   constructor(private readonly cli: LarkCli, private readonly tools: BaseTools) {}
 
   async start(event: MessageEvent): Promise<StreamingCardSession> {
+    const mentionId = event.chat_type === "group" ? event.sender_id : undefined;
     const created = await this.cli.runRetryable<unknown>([
       "api", "POST", "/open-apis/cardkit/v1/cards",
-      "--data", JSON.stringify({ type: "card_json", data: JSON.stringify(buildStreamingCard()) }),
+      "--data", JSON.stringify({ type: "card_json", data: JSON.stringify(buildStreamingCard(mentionId)) }),
       "--as", "bot", "--format", "json",
     ]);
     const cardId = findString(created, "card_id");
     if (!cardId) throw new Error("CardKit create response did not include card_id");
-    await this.tools.replyCard(event.message_id, cardId, event.chat_type === "group");
-    return new StreamingCardSession(this.cli, cardId);
+    if (event.chat_type === "group") await this.tools.sendCardToChat(event.chat_id, cardId);
+    else await this.tools.replyCard(event.message_id, cardId, false);
+    return new StreamingCardSession(this.cli, cardId, mentionId ? `<at id=${mentionId}></at> ` : "");
   }
 }
 
@@ -64,7 +67,11 @@ export class StreamingCardSession {
   private failure: unknown;
   private finished = false;
 
-  constructor(private readonly cli: LarkCli, private readonly cardId: string) {}
+  constructor(
+    private readonly cli: LarkCli,
+    private readonly cardId: string,
+    private readonly statusPrefix = "",
+  ) {}
 
   appendText(delta: string): void {
     if (this.finished || !delta) return;
@@ -74,7 +81,7 @@ export class StreamingCardSession {
 
   setStatus(status: StreamingCardStatus): void {
     if (this.finished) return;
-    this.updateElement(STATUS_ELEMENT_ID, STATUS_TEXT[status]);
+    this.updateElement(STATUS_ELEMENT_ID, `${this.statusPrefix}${STATUS_TEXT[status]}`);
   }
 
   async finish(finalText: string): Promise<boolean> {
@@ -86,7 +93,7 @@ export class StreamingCardSession {
     this.cancelTimer();
     this.answer = mergeFinalText(this.answer, finalText);
     this.flushAnswer();
-    this.updateElement(STATUS_ELEMENT_ID, "分析完成");
+    this.updateElement(STATUS_ELEMENT_ID, `${this.statusPrefix}分析完成`);
     this.updateSettings(this.answer);
     await this.queue;
     return this.failure === undefined;
@@ -102,7 +109,7 @@ export class StreamingCardSession {
     const text = `处理失败：${message.slice(0, 500)}`;
     this.answer = text;
     this.flushAnswer();
-    this.updateElement(STATUS_ELEMENT_ID, "分析失败");
+    this.updateElement(STATUS_ELEMENT_ID, `${this.statusPrefix}分析失败`);
     this.updateSettings(text);
     await this.queue;
     return this.failure === undefined;

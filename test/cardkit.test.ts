@@ -19,19 +19,18 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("interactive card replies", () => {
-  test("replies with a CardKit entity in the original group thread", async () => {
+describe("interactive card delivery", () => {
+  test("sends a CardKit entity directly to the group chat", async () => {
     const cli = { runRetryable: vi.fn(async (_args: string[]) => ({})) };
     const tools = new BaseTools(cli as never, config, {} as never);
 
-    await tools.replyCard("om_1", "card_1", true);
+    await tools.sendCardToChat("oc_1", "card_1");
 
     expect(cli.runRetryable).toHaveBeenCalledWith([
-      "im", "+messages-reply",
-      "--message-id", "om_1",
+      "im", "+messages-send",
+      "--chat-id", "oc_1",
       "--msg-type", "interactive",
       "--content", JSON.stringify({ type: "card", data: { card_id: "card_1" } }),
-      "--reply-in-thread",
       "--idempotency-key", expect.any(String),
       "--as", "bot", "--format", "json",
     ]);
@@ -39,9 +38,9 @@ describe("interactive card replies", () => {
 });
 
 describe("CardKit streaming", () => {
-  test("creates a Card 2.0 entity and places group replies in-thread", async () => {
+  test("creates a Card 2.0 entity and sends it directly to the group", async () => {
     const cli = { runRetryable: vi.fn(async (_args: string[]) => ({ data: { card_id: "card_1" } })) };
-    const tools = { replyCard: vi.fn(async () => ({})) };
+    const tools = { replyCard: vi.fn(async () => ({})), sendCardToChat: vi.fn(async () => ({})) };
     const cards = new StreamingCardKit(cli as never, tools as never);
 
     await cards.start({
@@ -63,10 +62,11 @@ describe("CardKit streaming", () => {
     expect(createBody.type).toBe("card_json");
     expect(card).toMatchObject({ schema: "2.0", config: { streaming_mode: true } });
     expect(card.body?.elements).toEqual(expect.arrayContaining([
-      expect.objectContaining({ element_id: STATUS_ELEMENT_ID, content: "正在分析" }),
+      expect.objectContaining({ element_id: STATUS_ELEMENT_ID, content: "<at id=ou_sender></at> 正在分析" }),
       expect.objectContaining({ element_id: ANSWER_ELEMENT_ID, content: ANSWER_PREFIX }),
     ]));
-    expect(tools.replyCard).toHaveBeenCalledWith("om_group", "card_1", true);
+    expect(tools.sendCardToChat).toHaveBeenCalledWith("oc_group", "card_1");
+    expect(tools.replyCard).not.toHaveBeenCalled();
   });
 
   test("coalesces deltas and serializes status, content, and close updates", async () => {

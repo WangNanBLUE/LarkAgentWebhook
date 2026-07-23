@@ -93,7 +93,7 @@ export class MessageService {
         content = `处理失败：${message.slice(0, 500)}`;
         this.logStreamingError(event, "model_after_start_failure", modelError);
       }
-      await this.reply(event, content, event.chat_type === "group")
+      await this.reply(event, content)
         .catch((replyError) => this.logStreamingError(event, "fallback_reply", replyError));
       return;
     }
@@ -105,7 +105,7 @@ export class MessageService {
         onToolEnd: () => session.setStatus("summarizing"),
       });
       if (!await session.finish(answer)) {
-        await this.reply(event, answer, event.chat_type === "group")
+        await this.reply(event, answer)
           .catch((replyError) => this.logStreamingError(event, "fallback_reply", replyError));
       }
     } catch (error) {
@@ -116,7 +116,7 @@ export class MessageService {
         return false;
       });
       if (!cardHandled) {
-        await this.reply(event, `处理失败：${message.slice(0, 500)}`, event.chat_type === "group")
+        await this.reply(event, `处理失败：${message.slice(0, 500)}`)
           .catch((replyError) => this.logStreamingError(event, "fallback_reply", replyError));
       }
     }
@@ -134,15 +134,16 @@ export class MessageService {
     })}\n`);
   }
 
-  private async reply(event: MessageEvent, content: string, replyInThread = false): Promise<void> {
+  private async reply(event: MessageEvent, content: string): Promise<void> {
     const replyContent = event.chat_type === "group"
       ? `<at user_id="${event.sender_id}"></at> ${content}`
       : content;
-    await this.tools.reply(event.message_id, replyContent, replyInThread);
+    if (event.chat_type === "group") await this.tools.sendToChat(event.chat_id, replyContent);
+    else await this.tools.reply(event.message_id, replyContent, false);
     writeMessageLog("message.sent", {
-      reply_to_message_id: event.message_id,
+      trigger_message_id: event.message_id,
       chat_id: event.chat_id,
-      reply_in_thread: replyInThread,
+      delivery: event.chat_type === "group" ? "chat" : "reply",
       content: replyContent,
     });
   }

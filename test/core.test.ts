@@ -218,7 +218,7 @@ describe("message routing", () => {
     };
     const state = { markMessageProcessed: vi.fn(() => true) };
     const agent = { run: vi.fn(async () => "你好，有什么可以帮你？") };
-    const tools = { reply: vi.fn(async () => ({})) };
+    const tools = { reply: vi.fn(async () => ({})), sendToChat: vi.fn(async () => ({})) };
     const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 
     await new MessageService("ou_bot", state as never, agent as never, tools as never).handle(event);
@@ -238,17 +238,17 @@ describe("message routing", () => {
     };
     const state = { markMessageProcessed: vi.fn(() => true) };
     const agent = { run: vi.fn(async () => "分析完成") };
-    const tools = { reply: vi.fn(async () => ({})) };
+    const tools = { reply: vi.fn(async () => ({})), sendToChat: vi.fn(async () => ({})) };
     const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 
     await new MessageService("ou_bot", state as never, agent as never, tools as never).handle(event);
     write.mockRestore();
 
-    expect(tools.reply).toHaveBeenCalledWith(
-      "om_group",
+    expect(tools.sendToChat).toHaveBeenCalledWith(
+      "oc_group",
       '<at user_id="ou_sender"></at> 分析完成',
-      false,
     );
+    expect(tools.reply).not.toHaveBeenCalled();
   });
 
   test("streams a card before running the agent and forwards progress", async () => {
@@ -277,7 +277,7 @@ describe("message routing", () => {
       observer.onTextDelta("完成", "分析完成");
       return "分析完成";
     }) };
-    const tools = { reply: vi.fn(async () => ({})) };
+    const tools = { reply: vi.fn(async () => ({})), sendToChat: vi.fn(async () => ({})) };
     const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 
     await new MessageService(
@@ -305,7 +305,7 @@ describe("message routing", () => {
     };
     const state = { markMessageProcessed: vi.fn(() => true) };
     const agent = { run: vi.fn(async () => "分析完成") };
-    const tools = { reply: vi.fn(async () => ({})) };
+    const tools = { reply: vi.fn(async () => ({})), sendToChat: vi.fn(async () => ({})) };
     const cards = { start: vi.fn(async () => { throw new Error("missing scope"); }) };
     const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
@@ -316,11 +316,10 @@ describe("message routing", () => {
     stdout.mockRestore();
     stderr.mockRestore();
 
-    expect(tools.reply).toHaveBeenCalledTimes(1);
-    expect(tools.reply).toHaveBeenCalledWith(
-      "om_start_failure",
+    expect(tools.sendToChat).toHaveBeenCalledTimes(1);
+    expect(tools.sendToChat).toHaveBeenCalledWith(
+      "oc_group",
       expect.stringContaining("分析完成"),
-      true,
     );
   });
 
@@ -335,7 +334,7 @@ describe("message routing", () => {
     };
     const state = { markMessageProcessed: vi.fn(() => true) };
     const agent = { run: vi.fn(async () => "分析完成") };
-    const tools = { reply: vi.fn(async () => ({})) };
+    const tools = { reply: vi.fn(async () => ({})), sendToChat: vi.fn(async () => ({})) };
     const session = {
       appendText: vi.fn(), setStatus: vi.fn(), finish: vi.fn(async () => false), fail: vi.fn(async () => false),
     };
@@ -347,11 +346,10 @@ describe("message routing", () => {
     ).handle(event);
     stdout.mockRestore();
 
-    expect(tools.reply).toHaveBeenCalledTimes(1);
-    expect(tools.reply).toHaveBeenCalledWith(
-      "om_finish_failure",
+    expect(tools.sendToChat).toHaveBeenCalledTimes(1);
+    expect(tools.sendToChat).toHaveBeenCalledWith(
+      "oc_group",
       expect.stringContaining("分析完成"),
-      true,
     );
   });
 
@@ -366,7 +364,7 @@ describe("message routing", () => {
     };
     const state = { markMessageProcessed: vi.fn(() => true) };
     const agent = { run: vi.fn(async () => "分析完成") };
-    const tools = { reply: vi.fn(async () => ({})) };
+    const tools = { reply: vi.fn(async () => ({})), sendToChat: vi.fn(async () => ({})) };
     const cards = { start: vi.fn() };
     const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 
@@ -376,10 +374,9 @@ describe("message routing", () => {
     stdout.mockRestore();
 
     expect(cards.start).not.toHaveBeenCalled();
-    expect(tools.reply).toHaveBeenCalledWith(
-      "om_text",
+    expect(tools.sendToChat).toHaveBeenCalledWith(
+      "oc_group",
       expect.stringContaining("分析完成"),
-      false,
     );
   });
 });
