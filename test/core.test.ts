@@ -107,6 +107,44 @@ describe("agent streaming", () => {
     expect(result).toMatchObject({ default_table_id: "tbl_1", fields: { fields: [{ field_name: "书名" }] } });
   });
 
+  test("uses the only real table when a Base URL points to a dashboard block", async () => {
+    const registry = SourceRegistry.fromPrompt(
+      "https://a.feishu.cn/base/bas_1?table=blk_dashboard",
+      { idFactory: () => "src_base" },
+    );
+    const base = {
+      resolve: vi.fn(async () => ({ sourceId: "src_base", baseToken: "bas_1", tableId: "blk_dashboard" })),
+      listBlocks: vi.fn(async () => ({
+        blocks: [
+          { id: "blk_dashboard", type: "dashboard" },
+          { id: "tbl_1", type: "table" },
+        ],
+      })),
+      listTables: vi.fn(async () => ({ tables: [{ id: "tbl_1", name: "数据" }] })),
+      fields: vi.fn(async () => ({ fields: [{ field_name: "书名" }] })),
+    };
+    const runner = new AgentRunner(
+      loadConfig(configEnv), {} as never, {} as never, undefined,
+      undefined, base as never,
+    );
+
+    const result = await (runner as unknown as {
+      executeTool(name: string, args: Record<string, unknown>, context: AgentRunContext): Promise<unknown>;
+    }).executeTool("inspect_base", { source_id: "src_base", table_id: null }, {
+      event: { message_id: "om_dashboard", chat_id: "oc_1", sender_id: "ou_1", chat_type: "p2p", content: "分析" },
+      prompt: "分析",
+      conversationKey: "om_dashboard",
+      sources: registry,
+      budget: new SourceBudget(),
+    });
+
+    expect(base.fields).toHaveBeenCalledWith(expect.objectContaining({ tableId: "blk_dashboard" }), "tbl_1");
+    expect(result).toMatchObject({
+      default_table_id: "tbl_1",
+      fields: { fields: [{ field_name: "书名" }] },
+    });
+  });
+
   test("runs independent read-only tool calls from one model round concurrently", async () => {
     const registry = SourceRegistry.fromPrompt(
       "https://a.feishu.cn/sheets/sht_1 https://a.feishu.cn/sheets/sht_2",

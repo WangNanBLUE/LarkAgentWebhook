@@ -367,13 +367,15 @@ export class AgentRunner {
         const location = await base.resolve(source);
         const [blocks, tables] = await Promise.all([base.listBlocks(location), base.listTables(location)]);
         const requestedTableId = args.table_id === null || args.table_id === undefined ? undefined : String(args.table_id);
-        const tableId = requestedTableId ?? location.tableId;
+        const tableIds = extractListedTableIds(tables);
+        const linkedTableId = location.tableId && tableIds.includes(location.tableId) ? location.tableId : undefined;
+        const tableId = requestedTableId ?? linkedTableId ?? (tableIds.length === 1 ? tableIds[0] : undefined);
         const fields = tableId ? await base.fields(location, tableId) : undefined;
         return {
           source_id: source.id,
           source_type: "base",
           title: source.title,
-          default_table_id: location.tableId ?? null,
+          default_table_id: tableId ?? null,
           blocks,
           tables,
           ...(fields ? { fields } : {}),
@@ -451,6 +453,22 @@ function isRequestAbort(error: unknown): boolean {
   return candidate?.name === "AbortError"
     || candidate?.name === "APIUserAbortError"
     || candidate?.message === "Request was aborted.";
+}
+
+function extractListedTableIds(value: unknown): string[] {
+  if (!value || typeof value !== "object") return [];
+  const tables = (value as { tables?: unknown }).tables;
+  if (!Array.isArray(tables)) return [];
+  return tables.flatMap((table) => {
+    if (!table || typeof table !== "object") return [];
+    const record = table as { id?: unknown; table_id?: unknown };
+    const id = typeof record.id === "string"
+      ? record.id
+      : typeof record.table_id === "string"
+        ? record.table_id
+        : undefined;
+    return id ? [id] : [];
+  });
 }
 
 function requireSourceReader(reader: SourceReader | undefined): SourceReader {
