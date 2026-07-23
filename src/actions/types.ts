@@ -19,4 +19,3 @@ export type FrozenAction =
 
 export type FrozenActionKind = FrozenAction["kind"];
 import type { ComponentType } from "../types.js";
-
