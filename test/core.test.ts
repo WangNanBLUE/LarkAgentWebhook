@@ -5,6 +5,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { classifyCliError } from "../src/lark/errors.js";
 import { StateStore } from "../src/state/store.js";
 import { MessageService, shouldHandleEvent, writeMessageLog } from "../src/service/message-service.js";
+import { GroupSourceService } from "../src/service/group-source-service.js";
 import { AgentRunner, addDashboardDateFilter, buildAggregateQuery, buildChartComponentConfig } from "../src/agent/runner.js";
 import type { AgentRunContext } from "../src/agent/runner.js";
 import { BaseTools, validateDashboardConfig } from "../src/lark/base-tools.js";
@@ -560,6 +561,36 @@ describe("document writes", () => {
 });
 
 describe("message routing", () => {
+  test("handles a group source command without calling the agent", async () => {
+    const event = {
+      message_id: "om_bind",
+      chat_id: "oc_group",
+      sender_id: "ou_sender",
+      chat_type: "group" as const,
+      content: "@竞品分析 固定来源 https://tenant.feishu.cn/docx/a",
+      mentions: [{ id: "ou_bot", key: "@_user_1", name: "竞品分析" }],
+    };
+    const state = new StateStore(":memory:");
+    stores.push(state);
+    const agent = { run: vi.fn() };
+    const tools = { reply: vi.fn(async () => ({})), sendToChat: vi.fn(async () => ({})) };
+    const groupSources = new GroupSourceService(state);
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    await new MessageService(
+      "ou_bot", state, agent as never, tools as never, "text",
+      undefined, undefined, undefined, groupSources,
+    ).handle(event);
+    write.mockRestore();
+
+    expect(agent.run).not.toHaveBeenCalled();
+    expect(tools.reply).toHaveBeenCalledWith(
+      "om_bind",
+      expect.stringContaining("已固定 1 个"),
+      false,
+    );
+  });
+
   test("includes the directly replied message as quoted agent context", async () => {
     const event = {
       message_id: "om_reply",

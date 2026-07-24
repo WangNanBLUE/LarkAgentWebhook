@@ -11,6 +11,7 @@ import { EventConsumer } from "./lark/event-consumer.js";
 import { SourceReader } from "./lark/source-reader.js";
 import { MessageService } from "./service/message-service.js";
 import { ApprovalService } from "./service/approval-service.js";
+import { GroupSourceService } from "./service/group-source-service.js";
 import { StateStore } from "./state/store.js";
 import type { CardActionEvent, MessageEvent } from "./types.js";
 
@@ -44,6 +45,7 @@ async function main(): Promise<void> {
 
   const agent = new AgentRunner(config, baseTools, stateStore, undefined, sourceReader, baseResource, actionService);
   const cards = new StreamingCardKit(cli, baseTools);
+  const groupSources = new GroupSourceService(stateStore);
   const botIdentity = config.lark.botOpenId || config.lark.botName;
   const service = new MessageService(
     botIdentity,
@@ -54,6 +56,7 @@ async function main(): Promise<void> {
     cards,
     actionExecutor,
     config.lark.defaultBase,
+    groupSources,
   );
   const approvalService = new ApprovalService(stateStore, actionExecutor, baseTools);
   const messageConsumer = new EventConsumer<MessageEvent>(cli, "im.message.receive_v1");

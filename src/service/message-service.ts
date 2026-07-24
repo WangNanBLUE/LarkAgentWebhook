@@ -7,6 +7,7 @@ import type { StateStore } from "../state/store.js";
 import { SourceBudget } from "../sources/budget.js";
 import { buildSources } from "../sources/registry.js";
 import type { MessageEvent } from "../types.js";
+import type { GroupSourceService } from "./group-source-service.js";
 
 export function shouldHandleEvent(event: MessageEvent, botIdentity: string): boolean {
   if (event.chat_type === "p2p") return true;
@@ -37,6 +38,7 @@ export class MessageService {
     private readonly cards?: Pick<StreamingCardKit, "start">,
     private readonly executor?: ActionExecutor,
     private readonly defaultBase?: AppConfig["lark"]["defaultBase"],
+    private readonly groupSources?: GroupSourceService,
   ) {}
 
   async handle(event: MessageEvent): Promise<void> {
@@ -75,6 +77,12 @@ export class MessageService {
             await this.reply(event, `变更执行结果未知，系统不会自动重试，以避免重复创建。\n原因：${message.slice(0, 300)}`);
           }
         }
+        return;
+      }
+
+      const groupCommand = this.groupSources?.handle(event, prompt);
+      if (groupCommand?.handled) {
+        await this.reply(event, groupCommand.message);
         return;
       }
 
