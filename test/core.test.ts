@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { classifyCliError } from "../src/lark/errors.js";
 import { StateStore } from "../src/state/store.js";
@@ -903,6 +906,75 @@ describe("state", () => {
     expect(store.claimPendingAction("ou_owner", "oc_1", 1500).ok).toBe(true);
     store.markActionUnknown("pa_unknown", "network timeout");
     expect(store.getPendingActionStatus("pa_unknown")).toBe("unknown");
+  });
+
+  test("persists idempotent group sources and enforces the group limit atomically", () => {
+    const store = new StateStore(":memory:");
+    stores.push(store);
+
+    expect(store.bindGroupSources("oc_1", [
+      { url: "https://tenant.feishu.cn/docx/a", kind: "document" },
+    ], "ou_1", 1000)).toEqual({
+      added: ["https://tenant.feishu.cn/docx/a"],
+      existing: [],
+    });
+    expect(store.bindGroupSources("oc_1", [
+      { url: "https://tenant.feishu.cn/docx/a", kind: "document" },
+    ], "ou_2", 1001)).toEqual({
+      added: [],
+      existing: ["https://tenant.feishu.cn/docx/a"],
+    });
+    expect(store.listGroupSources("oc_1")).toEqual([{
+      chatId: "oc_1",
+      url: "https://tenant.feishu.cn/docx/a",
+      kind: "document",
+      addedBy: "ou_1",
+      createdAt: 1000,
+    }]);
+
+    store.bindGroupSources("oc_1", Array.from({ length: 4 }, (_, index) => ({
+      url: `https://tenant.feishu.cn/docx/${index}`,
+      kind: "document" as const,
+    })), "ou_1", 1002);
+    expect(() => store.bindGroupSources("oc_1", [
+      { url: "https://tenant.feishu.cn/docx/overflow", kind: "document" },
+    ], "ou_1", 1003)).toThrow("Group source limit exceeded: 5");
+    expect(store.listGroupSources("oc_1")).toHaveLength(5);
+  });
+
+  test("removes and clears group sources without affecting another group", () => {
+    const store = new StateStore(":memory:");
+    stores.push(store);
+    const sources = [
+      { url: "https://tenant.feishu.cn/docx/a", kind: "document" as const },
+      { url: "https://tenant.feishu.cn/base/b", kind: "base" as const },
+    ];
+    store.bindGroupSources("oc_1", sources, "ou_1", 1000);
+    store.bindGroupSources("oc_2", sources.slice(0, 1), "ou_2", 1000);
+
+    expect(store.removeGroupSources("oc_1", [sources[0]!.url])).toEqual([sources[0]!.url]);
+    expect(store.listGroupSources("oc_1").map(({ url }) => url)).toEqual([sources[1]!.url]);
+    expect(store.clearGroupSources("oc_1")).toBe(1);
+    expect(store.listGroupSources("oc_1")).toEqual([]);
+    expect(store.listGroupSources("oc_2")).toHaveLength(1);
+  });
+
+  test("keeps group sources after reopening the SQLite state file", () => {
+    const directory = mkdtempSync(join(tmpdir(), "lark-agent-group-sources-"));
+    const path = join(directory, "state.sqlite");
+    try {
+      const first = new StateStore(path);
+      first.bindGroupSources("oc_1", [
+        { url: "https://tenant.feishu.cn/sheets/a", kind: "sheet" },
+      ], "ou_1", 1000);
+      first.close();
+
+      const second = new StateStore(path);
+      expect(second.listGroupSources("oc_1")).toHaveLength(1);
+      second.close();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });
 

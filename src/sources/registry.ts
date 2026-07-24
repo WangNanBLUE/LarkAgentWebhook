@@ -11,13 +11,27 @@ const KIND_BY_PREFIX: Array<[string, SourceKind]> = [
   ["/base/", "base"],
 ];
 
+export interface ParsedFeishuSourceUrl {
+  normalizedUrl: string;
+  kind: Exclude<SourceKind, "text">;
+  title: string;
+}
+
 export class SourceRegistry {
   private constructor(private readonly sources: Map<string, InputSource>) {}
 
-  static fromPrompt(prompt: string, options: { idFactory?: () => string } = {}): SourceRegistry {
+  static fromPrompt(
+    prompt: string,
+    options: { idFactory?: () => string; additionalUrls?: string[] } = {},
+  ): SourceRegistry {
     const idFactory = options.idFactory ?? (() => `src_${randomUUID()}`);
     const matches = [...prompt.matchAll(URL_PATTERN)];
-    if (matches.length > 5) throw new Error("At most 5 Feishu links are allowed per message");
+    const parsedLinks = new Map<string, ParsedFeishuSourceUrl>();
+    for (const raw of [...matches.map((match) => match[0]), ...(options.additionalUrls ?? [])]) {
+      const parsed = parseFeishuSourceUrl(raw);
+      parsedLinks.set(parsed.normalizedUrl, parsed);
+    }
+    if (parsedLinks.size > 5) throw new Error("At most 5 Feishu links are allowed per message");
 
     const sources = new Map<string, InputSource>();
     const text = prompt.replace(URL_PATTERN, " ").replace(/\s+/gu, " ").trim();
@@ -27,20 +41,13 @@ export class SourceRegistry {
       sources.set(id, { id, kind: "text", title: "消息文本", text });
     }
 
-    for (const match of matches) {
-      const raw = match[0].replace(TRAILING_PUNCTUATION, "");
-      const url = new URL(raw);
-      if (url.protocol !== "https:" || !isFeishuHostname(url.hostname)) {
-        throw new Error("Only HTTPS Feishu resource links are supported");
-      }
-      const kind = KIND_BY_PREFIX.find(([prefix]) => url.pathname.startsWith(prefix))?.[1];
-      if (!kind) throw new Error("Unsupported Feishu resource link");
+    for (const parsed of parsedLinks.values()) {
       const id = idFactory();
       sources.set(id, {
         id,
-        kind,
-        title: decodeURIComponent(url.pathname.split("/").filter(Boolean).at(-1) ?? kind),
-        url: url.toString(),
+        kind: parsed.kind,
+        title: parsed.title,
+        url: parsed.normalizedUrl,
       });
     }
     return new SourceRegistry(sources);
@@ -73,8 +80,12 @@ export interface DefaultBaseSourceConfig {
   tableName: string;
 }
 
-export function buildSources(prompt: string, defaultBase?: DefaultBaseSourceConfig): SourceRegistry {
-  const registry = SourceRegistry.fromPrompt(prompt);
+export function buildSources(
+  prompt: string,
+  defaultBase?: DefaultBaseSourceConfig,
+  additionalUrls: string[] = [],
+): SourceRegistry {
+  const registry = SourceRegistry.fromPrompt(prompt, { additionalUrls });
   const competitorRequest = /(竞品|书籍)/u.test(prompt) && /(分析|查询|统计|排行|对比)/u.test(prompt);
   if (!defaultBase || registry.hasLinkedSource() || !competitorRequest) return registry;
   return registry.withSource({
@@ -83,6 +94,28 @@ export function buildSources(prompt: string, defaultBase?: DefaultBaseSourceConf
     title: defaultBase.tableName,
     resolvedBase: { baseToken: defaultBase.baseToken, tableId: defaultBase.tableId },
   });
+}
+
+export function parseFeishuSourceUrl(raw: string): ParsedFeishuSourceUrl {
+  const url = new URL(raw.replace(TRAILING_PUNCTUATION, ""));
+  if (url.protocol !== "https:" || !isFeishuHostname(url.hostname)) {
+    throw new Error("Only HTTPS Feishu resource links are supported");
+  }
+  const kind = KIND_BY_PREFIX.find(([prefix]) => url.pathname.startsWith(prefix))?.[1];
+  if (!kind || kind === "text") throw new Error("Unsupported Feishu resource link");
+
+  const params = [...url.searchParams.entries()]
+    .sort(([leftKey, leftValue], [rightKey, rightValue]) =>
+      leftKey.localeCompare(rightKey) || leftValue.localeCompare(rightValue));
+  url.search = "";
+  for (const [key, value] of params) url.searchParams.append(key, value);
+  url.hash = "";
+
+  return {
+    normalizedUrl: url.toString(),
+    kind,
+    title: decodeURIComponent(url.pathname.split("/").filter(Boolean).at(-1) ?? kind),
+  };
 }
 
 function isFeishuHostname(hostname: string): boolean {

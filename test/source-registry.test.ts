@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { SourceBudget } from "../src/sources/budget.js";
-import { SourceRegistry } from "../src/sources/registry.js";
+import { parseFeishuSourceUrl, SourceRegistry } from "../src/sources/registry.js";
 
 function ids(...values: string[]): () => string {
   const iterator = values[Symbol.iterator]();
@@ -42,6 +42,41 @@ describe("source registry", () => {
     ].join(" "), { idFactory: ids("src_doc", "src_wiki", "src_sheet_1", "src_sheet_2") });
 
     expect(registry.list().map(({ kind }) => kind)).toEqual(["document", "wiki", "sheet", "sheet"]);
+  });
+
+  test("normalizes supported Feishu source URLs", () => {
+    expect(parseFeishuSourceUrl("https://TENANT.feishu.cn/docx/doc1?b=2&a=1#part")).toEqual({
+      normalizedUrl: "https://tenant.feishu.cn/docx/doc1?a=1&b=2",
+      kind: "document",
+      title: "doc1",
+    });
+  });
+
+  test("merges fixed URLs with message URLs and deduplicates normalized resources", () => {
+    const registry = SourceRegistry.fromPrompt(
+      "分析 https://tenant.feishu.cn/docx/doc1?a=1&b=2",
+      {
+        idFactory: ids("src_text", "src_doc"),
+        additionalUrls: ["https://tenant.feishu.cn/docx/doc1?b=2&a=1#part"],
+      },
+    );
+
+    expect(registry.list()).toEqual([
+      { id: "src_text", kind: "text", title: "消息文本" },
+      { id: "src_doc", kind: "document", title: "doc1" },
+    ]);
+  });
+
+  test("enforces the link limit after merging and deduplication", () => {
+    const fixed = Array.from({ length: 5 }, (_, index) => `https://a.feishu.cn/docx/f${index}`);
+    expect(() => SourceRegistry.fromPrompt(
+      "分析 https://a.feishu.cn/docx/current",
+      { additionalUrls: fixed },
+    )).toThrow("At most 5");
+    expect(() => SourceRegistry.fromPrompt(
+      "分析 https://a.feishu.cn/docx/f0",
+      { additionalUrls: fixed },
+    )).not.toThrow();
   });
 
   test("rejects more than five links and cross-request source ids", () => {

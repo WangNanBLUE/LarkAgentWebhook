@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { PendingAction } from "../types.js";
+import type { GroupSourceRecord, PendingAction } from "../types.js";
 
 type ClaimResult = { ok: true; action: PendingAction } | { ok: false; reason: "not_found" | "expired" };
 
@@ -40,6 +40,14 @@ export class StateStore {
         type TEXT NOT NULL,
         config_json TEXT NOT NULL,
         updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS group_sources (
+        chat_id TEXT NOT NULL,
+        normalized_url TEXT NOT NULL,
+        source_kind TEXT NOT NULL CHECK(source_kind IN ('document', 'wiki', 'sheet', 'base')),
+        added_by TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (chat_id, normalized_url)
       );
     `);
     this.ensureColumn("pending_actions", "result_json", "TEXT");
@@ -143,6 +151,77 @@ export class StateStore {
 
   setSetting(key: string, value: string): void {
     this.db.prepare("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key, value);
+  }
+
+  bindGroupSources(
+    chatId: string,
+    sources: Array<{ url: string; kind: GroupSourceRecord["kind"] }>,
+    addedBy: string,
+    now = Date.now(),
+  ): { added: string[]; existing: string[] } {
+    const unique = new Map(sources.map((source) => [source.url, source]));
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const rows = this.db.prepare("SELECT normalized_url FROM group_sources WHERE chat_id = ?")
+        .all(chatId) as Array<{ normalized_url: string }>;
+      const current = new Set(rows.map((row) => row.normalized_url));
+      const existing = [...unique.keys()].filter((url) => current.has(url));
+      const added = [...unique.keys()].filter((url) => !current.has(url));
+      if (current.size + added.length > 5) throw new Error("Group source limit exceeded: 5");
+
+      const insert = this.db.prepare(`
+        INSERT INTO group_sources(chat_id, normalized_url, source_kind, added_by, created_at)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      for (const url of added) {
+        const source = unique.get(url)!;
+        insert.run(chatId, url, source.kind, addedBy, now);
+      }
+      this.db.exec("COMMIT");
+      return { added, existing };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  listGroupSources(chatId: string): GroupSourceRecord[] {
+    const rows = this.db.prepare(`
+      SELECT chat_id, normalized_url, source_kind, added_by, created_at
+      FROM group_sources WHERE chat_id = ?
+      ORDER BY created_at, normalized_url
+    `).all(chatId) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      chatId: String(row.chat_id),
+      url: String(row.normalized_url),
+      kind: String(row.source_kind) as GroupSourceRecord["kind"],
+      addedBy: String(row.added_by),
+      createdAt: Number(row.created_at),
+    }));
+  }
+
+  removeGroupSources(chatId: string, urls: string[]): string[] {
+    const unique = [...new Set(urls)];
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const exists = this.db.prepare("SELECT 1 FROM group_sources WHERE chat_id = ? AND normalized_url = ?");
+      const remove = this.db.prepare("DELETE FROM group_sources WHERE chat_id = ? AND normalized_url = ?");
+      const removed: string[] = [];
+      for (const url of unique) {
+        if (!exists.get(chatId, url)) continue;
+        remove.run(chatId, url);
+        removed.push(url);
+      }
+      this.db.exec("COMMIT");
+      return removed;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  clearGroupSources(chatId: string): number {
+    return Number(this.db.prepare("DELETE FROM group_sources WHERE chat_id = ?").run(chatId).changes);
   }
 
   registerComponent(blockId: string, name: string, type: string, config: unknown): void {

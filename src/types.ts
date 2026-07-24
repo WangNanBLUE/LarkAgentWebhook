@@ -28,6 +28,14 @@ export interface CardActionEvent {
   action_value: string;
 }
 
+export interface GroupSourceRecord {
+  chatId: string;
+  url: string;
+  kind: "document" | "wiki" | "sheet" | "base";
+  addedBy: string;
+  createdAt: number;
+}
+
 import type { FrozenAction, FrozenActionKind } from "./actions/types.js";
 
 export interface PendingAction {
