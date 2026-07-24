@@ -3,10 +3,13 @@ import { classifyCliError } from "../src/lark/errors.js";
 import { StateStore } from "../src/state/store.js";
 import { MessageService, shouldHandleEvent, writeMessageLog } from "../src/service/message-service.js";
 import { AgentRunner, addDashboardDateFilter, buildAggregateQuery, buildChartComponentConfig } from "../src/agent/runner.js";
+import type { AgentRunContext } from "../src/agent/runner.js";
 import { BaseTools, validateDashboardConfig } from "../src/lark/base-tools.js";
 import { AGENT_INSTRUCTIONS } from "../src/agent/instructions.js";
 import { TOOL_DEFINITIONS } from "../src/agent/tool-schemas.js";
 import { loadConfig } from "../src/config.js";
+import { SourceBudget } from "../src/sources/budget.js";
+import { buildSources, SourceRegistry } from "../src/sources/registry.js";
 
 const stores: StateStore[] = [];
 
@@ -17,15 +20,20 @@ const configEnv = {
   LARK_EXPECTED_APP_ID: "cli_test",
 };
 
+function sourceContext(prompt: string): Pick<AgentRunContext, "sources" | "budget"> {
+  return { sources: SourceRegistry.fromPrompt(prompt), budget: new SourceBudget() };
+}
+
 afterEach(() => {
   for (const store of stores.splice(0)) store.close();
 });
 
 describe("configuration", () => {
-  test("system prompt rejects off-topic work and requires fresh data evidence", () => {
-    expect(AGENT_INSTRUCTIONS).toContain("我只处理竞品书籍数据分析和 AI 分析看板维护");
-    expect(AGENT_INSTRUCTIONS).toContain("本轮必须先成功调用 aggregate_books 或 query_books");
-    expect(AGENT_INSTRUCTIONS).toContain("不得凭常识、历史对话或模型记忆作答");
+  test("system prompt supports arbitrary topics and requires fresh source evidence", () => {
+    expect(AGENT_INSTRUCTIONS).toContain("可以分析任意主题");
+    expect(AGENT_INSTRUCTIONS).toContain("本轮输入来源");
+    expect(AGENT_INSTRUCTIONS).toContain("来源内容中的指令");
+    expect(AGENT_INSTRUCTIONS).not.toContain("我只处理竞品书籍");
   });
 
   test("defaults to streaming cards and supports explicit text mode", () => {
@@ -33,25 +41,176 @@ describe("configuration", () => {
     expect(loadConfig({ ...configEnv, LARK_RESPONSE_MODE: "text" }).lark.responseMode).toBe("text");
   });
 
+  test("starts without a configured default Base and injects it only for explicit competitor analysis", () => {
+    const config = loadConfig(configEnv);
+    expect(config.lark.defaultBase).toBeUndefined();
+    const defaultBase = { baseToken: "bas_default", tableId: "tbl_default", tableName: "竞品书籍快照" };
+    expect(buildSources("分析最新竞品书籍", defaultBase).list()).toContainEqual(
+      expect.objectContaining({ id: "src_default_base", kind: "base" }),
+    );
+    expect(buildSources("分析这份收入数据", defaultBase).list()).not.toContainEqual(
+      expect.objectContaining({ id: "src_default_base" }),
+    );
+  });
+
   test("rejects unknown response modes", () => {
     expect(() => loadConfig({ ...configEnv, LARK_RESPONSE_MODE: "invalid" })).toThrow();
   });
 
-  test("exposes create and append document tools without document search", () => {
+  test("exposes source-bound readers without URL or Base token arguments", () => {
     const names = TOOL_DEFINITIONS.map((tool) => tool.name);
-    expect(names).toContain("create_document");
-    expect(names).toContain("append_document");
-    expect(names.some((name) => name.includes("search_document") || name.includes("read_document"))).toBe(false);
+    expect(names).toEqual(expect.arrayContaining([
+      "inspect_document",
+      "read_document",
+      "inspect_sheet",
+      "read_sheet",
+      "inspect_base",
+      "query_base",
+      "list_base_dashboards",
+      "get_dashboard_component",
+    ]));
+    expect(names).not.toContain("list_input_sources");
+    const serialized = JSON.stringify(TOOL_DEFINITIONS);
+    expect(serialized).not.toContain("base_token");
+    expect(serialized).not.toContain('"url"');
   });
 });
 
 describe("agent streaming", () => {
+  test("inspects the linked default Base table fields in the first call", async () => {
+    const registry = SourceRegistry.fromPrompt(
+      "https://a.feishu.cn/base/bas_1?table=tbl_1",
+      { idFactory: () => "src_base" },
+    );
+    const base = {
+      resolve: vi.fn(async () => ({ sourceId: "src_base", baseToken: "bas_1", tableId: "tbl_1" })),
+      listBlocks: vi.fn(async () => ({ blocks: [] })),
+      listTables: vi.fn(async () => ({ tables: [{ table_id: "tbl_1" }] })),
+      fields: vi.fn(async () => ({ fields: [{ field_name: "书名" }] })),
+    };
+    const runner = new AgentRunner(
+      loadConfig(configEnv), {} as never, {} as never, undefined,
+      undefined, base as never,
+    );
+
+    const result = await (runner as unknown as {
+      executeTool(name: string, args: Record<string, unknown>, context: AgentRunContext): Promise<unknown>;
+    }).executeTool("inspect_base", { source_id: "src_base", table_id: null }, {
+      event: { message_id: "om_base", chat_id: "oc_1", sender_id: "ou_1", chat_type: "p2p", content: "分析" },
+      prompt: "分析",
+      conversationKey: "om_base",
+      sources: registry,
+      budget: new SourceBudget(),
+    });
+
+    expect(base.fields).toHaveBeenCalledWith(expect.objectContaining({ tableId: "tbl_1" }), "tbl_1");
+    expect(result).toMatchObject({ default_table_id: "tbl_1", fields: { fields: [{ field_name: "书名" }] } });
+  });
+
+  test("uses the only real table when a Base URL points to a dashboard block", async () => {
+    const registry = SourceRegistry.fromPrompt(
+      "https://a.feishu.cn/base/bas_1?table=blk_dashboard",
+      { idFactory: () => "src_base" },
+    );
+    const base = {
+      resolve: vi.fn(async () => ({ sourceId: "src_base", baseToken: "bas_1", tableId: "blk_dashboard" })),
+      listBlocks: vi.fn(async () => ({
+        blocks: [
+          { id: "blk_dashboard", type: "dashboard" },
+          { id: "tbl_1", type: "table" },
+        ],
+      })),
+      listTables: vi.fn(async () => ({ tables: [{ id: "tbl_1", name: "数据" }] })),
+      fields: vi.fn(async () => ({ fields: [{ field_name: "书名" }] })),
+    };
+    const runner = new AgentRunner(
+      loadConfig(configEnv), {} as never, {} as never, undefined,
+      undefined, base as never,
+    );
+
+    const result = await (runner as unknown as {
+      executeTool(name: string, args: Record<string, unknown>, context: AgentRunContext): Promise<unknown>;
+    }).executeTool("inspect_base", { source_id: "src_base", table_id: null }, {
+      event: { message_id: "om_dashboard", chat_id: "oc_1", sender_id: "ou_1", chat_type: "p2p", content: "分析" },
+      prompt: "分析",
+      conversationKey: "om_dashboard",
+      sources: registry,
+      budget: new SourceBudget(),
+    });
+
+    expect(base.fields).toHaveBeenCalledWith(expect.objectContaining({ tableId: "blk_dashboard" }), "tbl_1");
+    expect(result).toMatchObject({
+      default_table_id: "tbl_1",
+      fields: { fields: [{ field_name: "书名" }] },
+    });
+  });
+
+  test("runs independent read-only tool calls from one model round concurrently", async () => {
+    const registry = SourceRegistry.fromPrompt(
+      "https://a.feishu.cn/sheets/sht_1 https://a.feishu.cn/sheets/sht_2",
+      { idFactory: (() => {
+        const ids = ["src_sheet_1", "src_sheet_2"][Symbol.iterator]();
+        return () => ids.next().value!;
+      })() },
+    );
+    const sourceIds = registry.list().map((source) => source.id);
+    const calls = sourceIds.map((sourceId, index) => ({
+      type: "function_call",
+      id: `fc_${index}`,
+      call_id: `call_${index}`,
+      name: "inspect_sheet",
+      arguments: JSON.stringify({ source_id: sourceId }),
+      status: "completed",
+    }));
+    const makeStream = (response: unknown) => ({
+      async *[Symbol.asyncIterator]() {
+        yield { type: "response.completed", response };
+      },
+      finalResponse: vi.fn(async () => response),
+    });
+    const responses = {
+      stream: vi.fn()
+        .mockReturnValueOnce(makeStream({ output: calls, output_text: "", status: "completed" }))
+        .mockReturnValueOnce(makeStream({
+          output: [{ type: "message" }], output_text: "分析完成", status: "completed",
+        })),
+    };
+    let active = 0;
+    let maxActive = 0;
+    const sourceReader = {
+      inspectSheet: vi.fn(async (source: { id: string }) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        active -= 1;
+        return { source_id: source.id };
+      }),
+    };
+    const runner = new AgentRunner(
+      loadConfig(configEnv), {} as never, {} as never, responses as never,
+      sourceReader as never,
+    );
+
+    await expect(runner.run({
+      event: { message_id: "om_parallel", chat_id: "oc_1", sender_id: "ou_1", chat_type: "p2p", content: "分析" },
+      prompt: "分析",
+      conversationKey: "om_parallel",
+      sources: registry,
+      budget: new SourceBudget(),
+    })).resolves.toBe("分析完成");
+
+    expect(maxActive).toBe(2);
+    const nextRoundInput = responses.stream.mock.calls[1]?.[0]?.input as Array<{ type?: string; call_id?: string }>;
+    expect(nextRoundInput.filter((item) => item.type === "function_call_output").map((item) => item.call_id))
+      .toEqual(["call_0", "call_1"]);
+  });
+
   test("dispatches structured document creation arguments", async () => {
     const call = {
       type: "function_call",
       id: "fc_doc",
       call_id: "call_doc",
-      name: "create_document",
+      name: "propose_document_create",
       arguments: JSON.stringify({ title: "竞品分析", content_xml: "<p>分析内容</p>" }),
       status: "completed",
     };
@@ -72,16 +231,23 @@ describe("agent streaming", () => {
           { output: [{ type: "message" }], output_text: "文档已创建" },
         )),
     };
-    const tools = { createDocument: vi.fn(async () => ({ url: "https://example.test/docx/1" })) };
-    const runner = new AgentRunner(loadConfig(configEnv), tools as never, {} as never, responses as never);
+    const actions = { proposeDocumentCreate: vi.fn(async () => ({ id: "pa_1" })) };
+    const runner = new AgentRunner(
+      loadConfig(configEnv), {} as never, {} as never, responses as never,
+      undefined, undefined, actions as never,
+    );
 
     await runner.run({
       event: { message_id: "om_doc", chat_id: "oc_1", sender_id: "ou_1", chat_type: "p2p", content: "创建文档" },
       prompt: "创建文档",
       conversationKey: "om_doc",
+      ...sourceContext("创建文档"),
     });
 
-    expect(tools.createDocument).toHaveBeenCalledWith("竞品分析", "<p>分析内容</p>");
+    expect(actions.proposeDocumentCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ requesterId: "ou_1" }),
+      { title: "竞品分析", content_xml: "<p>分析内容</p>" },
+    );
   });
 
   test("rejects an incomplete response instead of returning partial text", async () => {
@@ -117,6 +283,7 @@ describe("agent streaming", () => {
       },
       prompt: "比较两本书",
       conversationKey: "om_incomplete",
+      ...sourceContext("比较两本书"),
     })).rejects.toThrow("Agent response incomplete: max_output_tokens");
   });
 
@@ -125,7 +292,7 @@ describe("agent streaming", () => {
       type: "function_call",
       id: "fc_1",
       call_id: "call_1",
-      name: "get_source_schema",
+      name: "list_input_sources",
       arguments: "{}",
       status: "completed",
     };
@@ -145,7 +312,7 @@ describe("agent streaming", () => {
           { type: "response.output_text.delta", delta: "完成" },
         ], { output: [{ type: "message" }], output_text: "分析完成" })),
     };
-    const tools = { getSourceSchema: vi.fn(async () => ({ fields: [] })) };
+    const tools = {};
     const observer = {
       onTextDelta: vi.fn(),
       onToolStart: vi.fn(),
@@ -168,9 +335,10 @@ describe("agent streaming", () => {
       },
       prompt: "分析",
       conversationKey: "om_1",
+      ...sourceContext("分析"),
     }, observer);
 
-    expect(observer.onToolStart).toHaveBeenCalledWith("get_source_schema");
+    expect(observer.onToolStart).toHaveBeenCalledWith("list_input_sources");
     expect(observer.onToolEnd).toHaveBeenCalledTimes(1);
     expect(observer.onTextDelta).toHaveBeenNthCalledWith(1, "分析", "分析");
     expect(observer.onTextDelta).toHaveBeenNthCalledWith(2, "完成", "分析完成");
@@ -178,12 +346,61 @@ describe("agent streaming", () => {
     expect(responses.stream).toHaveBeenCalledTimes(2);
   });
 
+  test("keeps an active visible text stream alive beyond the absolute deadline", async () => {
+    const completedResponse = {
+      output: [{ type: "message" }],
+      output_text: "分析完成",
+      status: "completed",
+    };
+    const responses = {
+      stream: vi.fn((_params: unknown, options: { signal: AbortSignal }) => {
+        const wait = (milliseconds: number) => new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(resolve, milliseconds);
+          const abort = () => {
+            clearTimeout(timer);
+            reject(new Error("Request was aborted."));
+          };
+          if (options.signal.aborted) abort();
+          else options.signal.addEventListener("abort", abort, { once: true });
+        });
+        return {
+          async *[Symbol.asyncIterator]() {
+            yield { type: "response.output_text.delta", delta: "分析" };
+            await wait(50);
+            yield { type: "response.output_text.delta", delta: "完成" };
+            await wait(50);
+            yield { type: "response.completed", response: completedResponse };
+          },
+          finalResponse: vi.fn(async () => completedResponse),
+        };
+      }),
+    };
+    const config = loadConfig(configEnv);
+    Object.assign(config.agent, { timeoutMs: 80, finalResponseReserveMs: 20 });
+    const observer = {
+      onTextDelta: vi.fn(),
+      onToolStart: vi.fn(),
+      onToolEnd: vi.fn(),
+    };
+    const runner = new AgentRunner(config, {} as never, {} as never, responses as never);
+
+    await expect(runner.run({
+      event: { message_id: "om_long_stream", chat_id: "oc_1", sender_id: "ou_1", chat_type: "p2p", content: "分析" },
+      prompt: "分析",
+      conversationKey: "om_long_stream",
+      ...sourceContext("分析"),
+    }, observer)).resolves.toBe("分析完成");
+
+    expect(observer.onTextDelta).toHaveBeenCalledTimes(2);
+    expect(responses.stream).toHaveBeenCalledTimes(1);
+  });
+
   test("falls back to textual tool results when the upstream rejects function outputs", async () => {
     const call = {
       type: "function_call",
       id: "fc_1",
       call_id: "call_1",
-      name: "get_source_schema",
+      name: "list_input_sources",
       arguments: "{}",
       status: "completed",
     };
@@ -202,7 +419,7 @@ describe("agent streaming", () => {
           { type: "response.output_text.delta", delta: "分析完成" },
         ], { output: [{ type: "message" }], output_text: "" })),
     };
-    const tools = { getSourceSchema: vi.fn(async () => ({ fields: [] })) };
+    const tools = {};
     const runner = new AgentRunner(
       loadConfig(configEnv),
       tools as never,
@@ -220,15 +437,15 @@ describe("agent streaming", () => {
       },
       prompt: "分析",
       conversationKey: "om_compat",
+      ...sourceContext("分析"),
     });
 
     const compatibilityInput = responses.stream.mock.calls[2]?.[0]?.input as Array<Record<string, unknown>>;
     expect(answer).toBe("分析完成");
-    expect(tools.getSourceSchema).toHaveBeenCalledTimes(1);
     expect(responses.stream).toHaveBeenCalledTimes(3);
     expect(compatibilityInput.some((item) => item.type === "function_call_output")).toBe(false);
     expect(JSON.stringify(compatibilityInput)).toContain("工具调用记录");
-    expect(JSON.stringify(compatibilityInput)).toContain("fields");
+    expect(JSON.stringify(compatibilityInput)).toContain("消息文本");
 
     responses.stream
       .mockReturnValueOnce(makeStream([], { output: [call], output_text: "" }))
@@ -246,6 +463,7 @@ describe("agent streaming", () => {
       },
       prompt: "再次分析",
       conversationKey: "om_compat_2",
+      ...sourceContext("再次分析"),
     });
     const cachedCompatibilityInput = responses.stream.mock.calls[4]?.[0]?.input as Array<Record<string, unknown>>;
 
@@ -253,6 +471,51 @@ describe("agent streaming", () => {
     expect(responses.stream).toHaveBeenCalledTimes(5);
     expect(cachedCompatibilityInput.some((item) => item.type === "function_call_output")).toBe(false);
     expect(JSON.stringify(cachedCompatibilityInput)).toContain("工具调用记录");
+  });
+
+  test("reserves the final response window instead of spending the deadline on more tools", async () => {
+    const call = {
+      type: "function_call",
+      id: "fc_sources",
+      call_id: "call_sources",
+      name: "list_input_sources",
+      arguments: "{}",
+      status: "completed",
+    };
+    const makeStream = (response: unknown) => ({
+      async *[Symbol.asyncIterator]() {
+        yield { type: "response.completed", response };
+      },
+      finalResponse: vi.fn(async () => response),
+    });
+    const responses = {
+      stream: vi.fn()
+        .mockReturnValueOnce(makeStream({ output: [call], output_text: "", status: "completed" }))
+        .mockReturnValueOnce(makeStream({
+          output: [{ type: "message" }], output_text: "基于已有数据总结", status: "completed",
+        })),
+    };
+    const config = loadConfig(configEnv);
+    Object.assign(config.agent, { timeoutMs: 100, finalResponseReserveMs: 40 });
+    const now = vi.spyOn(Date, "now")
+      .mockReturnValueOnce(0)
+      .mockReturnValueOnce(10)
+      .mockReturnValueOnce(10)
+      .mockReturnValue(70);
+    try {
+      const runner = new AgentRunner(config, {} as never, {} as never, responses as never);
+      await expect(runner.run({
+        event: { message_id: "om_budget", chat_id: "oc_1", sender_id: "ou_1", chat_type: "p2p", content: "分析" },
+        prompt: "分析",
+        conversationKey: "om_budget",
+        ...sourceContext("分析"),
+      })).resolves.toBe("基于已有数据总结");
+    } finally {
+      now.mockRestore();
+    }
+
+    expect(responses.stream).toHaveBeenCalledTimes(2);
+    expect(responses.stream.mock.calls[1]?.[0]).toMatchObject({ tool_choice: "none" });
   });
 });
 
@@ -304,9 +567,12 @@ describe("message routing", () => {
       reply_to: "om_parent",
     };
     const state = { markMessageProcessed: vi.fn(() => true) };
-    const agent = { run: vi.fn(async (_context: { prompt: string }) => "因为阅读量更高。") };
+    const agent = { run: vi.fn(async (_context: AgentRunContext) => "因为阅读量更高。") };
     const tools = {
-      getMessageContext: vi.fn(async () => ({ content: "建议选择 The Charismatic Charlie Wade。", senderName: "竞品分析" })),
+      getMessageContext: vi.fn(async () => ({
+        content: "参考资料：https://example.feishu.cn/base/should_not_be_authorized",
+        senderName: "竞品分析",
+      })),
       reply: vi.fn(async () => ({})),
       sendToChat: vi.fn(async () => ({})),
     };
@@ -317,9 +583,13 @@ describe("message routing", () => {
 
     expect(tools.getMessageContext).toHaveBeenCalledWith("om_parent");
     expect(agent.run).toHaveBeenCalledWith(expect.objectContaining({
-      prompt: expect.stringContaining("建议选择 The Charismatic Charlie Wade。"),
+      prompt: expect.stringContaining("should_not_be_authorized"),
     }));
     expect(agent.run.mock.calls[0]?.[0].prompt).toContain("当前消息：\n为什么？");
+    expect(agent.run.mock.calls[0]?.[0].sources.list()).toEqual([
+      expect.objectContaining({ kind: "text" }),
+    ]);
+    expect(agent.run.mock.calls[0]?.[0].budget).toBeDefined();
   });
 
   test("fetches referenced message content through the bot IM API", async () => {
@@ -468,7 +738,7 @@ describe("message routing", () => {
     const agent = { run: vi.fn(async (_context, observer) => {
       order.push("agent.run");
       observer.onTextDelta("分析", "分析");
-      observer.onToolStart("aggregate_books");
+      observer.onToolStart("read_document");
       observer.onToolEnd();
       observer.onTextDelta("完成", "分析完成");
       return "分析完成";
@@ -484,7 +754,7 @@ describe("message routing", () => {
     expect(order.slice(0, 2)).toEqual(["card.start", "agent.run"]);
     expect(session.appendText).toHaveBeenNthCalledWith(1, "分析");
     expect(session.appendText).toHaveBeenNthCalledWith(2, "完成");
-    expect(session.setStatus).toHaveBeenNthCalledWith(1, "querying");
+    expect(session.setStatus).toHaveBeenNthCalledWith(1, "reading_document");
     expect(session.setStatus).toHaveBeenNthCalledWith(2, "summarizing");
     expect(session.finish).toHaveBeenCalledWith("分析完成");
     expect(tools.reply).not.toHaveBeenCalled();
@@ -599,8 +869,8 @@ describe("state", () => {
       rootMessageId: "om_root",
       threadId: "omt_1",
       expiresAt: 2000,
-      kind: "component.create",
-      payload: { name: "来源分布" },
+      kind: "document.create",
+      payload: { kind: "document.create", title: "来源分布", contentXml: "<p>x</p>", idempotencyKey: "idem_1" },
     });
 
     expect(store.claimPendingAction("ou_other", "oc_1", 1500)).toEqual({ ok: false, reason: "not_found" });
@@ -616,8 +886,8 @@ describe("state", () => {
       rootMessageId: "om_root_2",
       threadId: "omt_1",
       expiresAt: 1000,
-      kind: "component.update",
-      payload: { name: "来源分布 2" },
+      kind: "document.create",
+      payload: { kind: "document.create", title: "来源分布 2", contentXml: "<p>x</p>", idempotencyKey: "idem_2" },
     });
     expect(store.claimPendingAction("ou_owner", "oc_1", 1001)).toEqual({ ok: false, reason: "expired" });
   });
@@ -627,7 +897,8 @@ describe("state", () => {
     stores.push(store);
     store.createPendingAction({
       id: "pa_unknown", requesterId: "ou_owner", chatId: "oc_1", rootMessageId: "om_1",
-      threadId: "om_1", expiresAt: 2000, kind: "component.create", payload: { name: "来源分布" },
+      threadId: "om_1", expiresAt: 2000, kind: "document.create",
+      payload: { kind: "document.create", title: "来源分布", contentXml: "<p>x</p>", idempotencyKey: "idem_3" },
     });
     expect(store.claimPendingAction("ou_owner", "oc_1", 1500).ok).toBe(true);
     store.markActionUnknown("pa_unknown", "network timeout");

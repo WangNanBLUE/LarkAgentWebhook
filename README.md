@@ -1,112 +1,67 @@
-# 竞品分析飞书 Agent
+# 通用飞书数据 Agent
 
-本机常驻的 Node.js 服务。它通过 `lark-cli` 长连接接收群内 `@竞品分析` 消息，调用 OpenAI Responses API 的受控工具查询 `竞品书籍快照`，并在确认后维护独立的 `竞品书籍 AI 分析看板`。
+本机常驻的 Node.js 服务。机器人通过 `lark-cli` 以应用身份接收飞书消息，可分析本轮文本及用户明确提供的 Docx/Wiki、Sheets、Base 链接，并在交互卡确认后写入云文档或来源 Base 的已有看板。
 
-## 要求
+## 能力边界
 
-- Node.js 22+
-- `lark-cli` 1.0.74+
-- 飞书应用“竞品分析”已开启机器人能力
-- 应用已订阅 `im.message.receive_v1`
-- 应用已开通群聊 @ 消息、`im:message:send_as_bot`、`cardkit:card:write` 以及目标 Base 读写权限
-- 机器人已加入目标群，且应用或机器人对目标 Base 有完全访问权限
-- 自定义模型端点支持 OpenAI Responses API 和 function calling
+- 每条消息最多 5 个飞书链接、20,000 字直接文本。
+- 单来源最多向模型返回 60,000 字，本轮所有来源合计 120,000 字；Base 查询最多 200 行。
+- 只支持 `*.feishu.cn` 的 Docx/Wiki、Sheets 和 Base 链接，不搜索云空间，不接受来源内容追加的链接或工具指令。
+- 所有资源必须提前共享给应用。读取和写入始终使用应用身份，不回退到用户 OAuth。
+- 可在用户提供的 Base 中创建组件、修改任意已有组件，但不能删除组件或新建看板。
+- 新建、追加、替换云文档，以及创建、修改看板组件，都必须先发送交互确认卡。写入参数在提案时冻结，确认阶段不再次调用模型。
 
-## 配置飞书应用
+## 飞书应用权限
 
-在本项目目录创建独立 profile。App Secret 通过 stdin 输入，不要放在命令参数或仓库中：
+应用需开启机器人能力，订阅 `im.message.receive_v1` 和 `card.action.trigger`，并具备：
 
-```bash
-printf '%s' "$COMPETITOR_APP_SECRET" | lark-cli config init \
-  --name competitor-analysis \
-  --app-id "$COMPETITOR_APP_ID" \
-  --app-secret-stdin \
-  --brand feishu
+- 机器人收发消息与群聊 @ 消息权限
+- CardKit 卡片创建、发送和更新权限
+- Docx/Wiki 文档读取与编辑权限
+- Sheets 读取权限
+- Base 表结构、记录、看板组件读取与写入权限
 
-lark-cli config strict-mode bot
-lark-cli whoami
-```
+目标资源还需要显式共享给该应用。
 
-`whoami` 必须显示 `identity: "bot"`，且 `appId` 是“竞品分析”应用。启动预检若返回 `missing_scopes`，按错误里的 `console_url` 在开发者后台开通权限，不要执行用户授权登录。
-
-## 配置模型
+## 配置
 
 ```bash
 cp .env.example .env
 ```
 
-编辑 `.env`，至少填写：
+至少填写模型配置、`LARK_EXPECTED_APP_ID`。`LARK_BASE_*` 是可选的旧竞品书籍默认来源；只有当前消息没有飞书链接且明确包含竞品/书籍分析意图时才会注入。
 
-```dotenv
-OPENAI_BASE_URL=https://your-provider.example/v1
-OPENAI_API_KEY=...
-OPENAI_MODEL=...
-LARK_EXPECTED_APP_ID=cli_your_competitor_analysis_app
-LARK_RESPONSE_MODE=streaming_card
-```
-
-`LARK_RESPONSE_MODE` 默认是 `streaming_card`：收到消息后立即发送 Card 2.0，模型通过 Responses SSE 返回的文本会每 250ms 合并更新到同一张卡片。工具调用期间卡片显示看板查询状态；卡片创建或更新失败时自动降级为一条完整文本回复。
-
-设置为 `text` 可启用兼容模式。该模式仍使用 Responses SSE 获取最终结果，但只发送一条普通文本消息。
-
-Node 不会自动读取 `.env`。开发时使用：
+`lark-cli` 必须处于 bot 严格模式：
 
 ```bash
-npm install
-node --env-file=.env --import tsx src/index.ts
+lark-cli config strict-mode bot
+lark-cli whoami
 ```
 
-或先在 Shell / PM2 环境中导出这些变量。
+`whoami` 必须显示 `identity: "bot"`、`available: true`，且 App ID 与配置一致。不要执行用户授权登录。
 
 ## 运行
 
 ```bash
+npm install
 npm test
 npm run check
 npm run build
 node --env-file=.env dist/src/index.js
 ```
 
-健康检查仅监听本机：
+健康检查：
 
 ```bash
 curl http://127.0.0.1:8787/healthz
 ```
 
-PM2：
-
-```bash
-npm install -g pm2
-npm run build
-set -a && source .env && set +a
-pm2 start ecosystem.config.cjs
-pm2 save
-```
-
-服务的 stdout 和 stderr 合并写入 `data/agent.log`。查看实时日志：
-
-```bash
-tail -f data/agent.log
-```
-
-## 群内用法
+## 使用示例
 
 ```text
-@竞品分析 最新快照中，阅读量最高的 10 本书是什么？
-@竞品分析 按书籍来源创建一个环形图
+@竞品分析 分析这份文档并把结论写成新文档 https://tenant.feishu.cn/docx/...
+@竞品分析 按地区汇总收入并在这个 Base 的“经营看板”创建柱状图 https://tenant.feishu.cn/base/...
+@竞品分析 对比以下两组数据：A 组 120，B 组 96
 ```
 
-新增或修改组件时，机器人先回复预览。发起人需要在同一话题中发送：
-
-```text
-@竞品分析 确认
-```
-
-确认在 10 分钟后过期。其他成员不能确认该提案。
-
-## 安全边界
-
-- 模型只能调用固定的查询和组件提案工具。
-- 模型不能执行 Shell、任意 HTTP、删除操作或直接写看板。
-- 写入参数在预览时冻结，确认阶段不再次调用模型。
-- 只管理服务登记的 AI 看板组件，不修改原看板的 dashboard-v2 组件。
+写请求会先出现 10 分钟有效的确认卡，只有发起人可在原聊天确认。文档 revision 或看板组件配置在确认前发生变化时，执行会被拒绝并要求重新生成提案。

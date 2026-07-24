@@ -114,6 +114,11 @@ export class StateStore {
       .run(message.slice(0, 1000), id);
   }
 
+  markActionFailed(id: string, message: string): void {
+    this.db.prepare("UPDATE pending_actions SET status = 'failed', error_message = ? WHERE id = ? AND status = 'executing'")
+      .run(message.slice(0, 1000), id);
+  }
+
   setActionReconciliation(id: string, value: unknown): void {
     this.db.prepare("UPDATE pending_actions SET reconciliation_json = ? WHERE id = ? AND status = 'executing'").run(JSON.stringify(value), id);
   }

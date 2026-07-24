@@ -10,7 +10,11 @@ export const ANSWER_PREFIX = "\u200b";
 const FLUSH_INTERVAL_MS = 250;
 const STATUS_TEXT = {
   analyzing: "正在分析",
-  querying: "正在查询看板数据",
+  querying: "正在处理数据",
+  reading_document: "正在读取文档",
+  reading_sheet: "正在读取电子表格",
+  querying_base: "正在查询多维表格",
+  preparing_change: "正在准备变更预览",
   summarizing: "正在整理分析结果",
 } as const;
 
@@ -62,7 +66,9 @@ export class StreamingCardSession {
   private queue: Promise<void> = Promise.resolve();
   private timer: NodeJS.Timeout | undefined;
   private answer = "";
-  private lastQueuedAnswer = "";
+  private lastSentAnswer = "";
+  private pendingAnswer: string | undefined;
+  private answerDrainQueued = false;
   private failure: unknown;
   private finished = false;
 
@@ -125,9 +131,24 @@ export class StreamingCardSession {
 
   private flushAnswer(): void {
     this.timer = undefined;
-    if (this.answer === this.lastQueuedAnswer) return;
-    this.lastQueuedAnswer = this.answer;
-    this.updateElement(ANSWER_ELEMENT_ID, this.answer ? `${ANSWER_PREFIX}${this.answer}` : ANSWER_PREFIX);
+    if (this.answer === this.lastSentAnswer || this.answer === this.pendingAnswer) return;
+    this.pendingAnswer = this.answer;
+    if (this.answerDrainQueued) return;
+    this.answerDrainQueued = true;
+    const path = `/open-apis/cardkit/v1/cards/${encodeURIComponent(this.cardId)}/elements/${ANSWER_ELEMENT_ID}/content`;
+    this.queue = this.queue.then(async () => {
+      while (this.pendingAnswer !== undefined && this.failure === undefined) {
+        const answer = this.pendingAnswer;
+        this.pendingAnswer = undefined;
+        await this.request("PUT", path, (sequence) => ({
+          content: answer ? `${ANSWER_PREFIX}${answer}` : ANSWER_PREFIX,
+          sequence,
+          uuid: randomUUID(),
+        }));
+        this.lastSentAnswer = answer;
+      }
+      this.answerDrainQueued = false;
+    });
   }
 
   private updateElement(elementId: string, content: string): void {
@@ -159,19 +180,27 @@ export class StreamingCardSession {
     path: string,
     body: (sequence: number) => Record<string, unknown>,
   ): void {
-    const sequence = ++this.sequence;
     this.queue = this.queue.then(async () => {
       if (this.failure !== undefined) return;
-      try {
-        await this.cli.runRetryable([
-          "api", method, path,
-          "--data", JSON.stringify(body(sequence)),
-          "--as", "bot", "--format", "json",
-        ]);
-      } catch (error) {
-        this.failure ??= error;
-      }
+      await this.request(method, path, body);
     });
+  }
+
+  private async request(
+    method: "PUT" | "PATCH",
+    path: string,
+    body: (sequence: number) => Record<string, unknown>,
+  ): Promise<void> {
+    const sequence = ++this.sequence;
+    try {
+      await this.cli.runRetryable([
+        "api", method, path,
+        "--data", JSON.stringify(body(sequence)),
+        "--as", "bot", "--format", "json",
+      ]);
+    } catch (error) {
+      this.failure ??= error;
+    }
   }
 }
 

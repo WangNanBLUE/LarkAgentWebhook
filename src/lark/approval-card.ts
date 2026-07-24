@@ -1,20 +1,22 @@
-import type { ComponentProposal, PendingAction } from "../types.js";
+import type { FrozenAction } from "../actions/types.js";
+import type { PendingAction } from "../types.js";
 
-export type ApprovalCardStatus = "pending" | "executing" | "completed" | "cancelled" | "unknown";
+export type ApprovalCardStatus = "pending" | "executing" | "completed" | "cancelled" | "failed" | "unknown";
 
 const STATUS = {
   pending: { template: "yellow", label: "等待确认", title: "看板变更待确认" },
   executing: { template: "blue", label: "执行中", title: "正在执行看板变更" },
   completed: { template: "green", label: "已完成", title: "看板变更已完成" },
   cancelled: { template: "grey", label: "已取消", title: "看板变更已取消" },
+  failed: { template: "red", label: "未执行", title: "变更未执行" },
   unknown: { template: "red", label: "结果未知", title: "看板变更结果未知" },
 } as const;
 
 export function buildApprovalCard(action: PendingAction, status: ApprovalCardStatus, detail?: string): Record<string, unknown> {
-  const proposal = action.payload as ComponentProposal;
+  const proposal = action.payload;
   const meta = STATUS[status];
-  const operation = proposal.action === "create" ? "新增组件" : "修改组件";
-  const target = proposal.action === "create" ? proposal.name : proposal.name ?? proposal.blockId;
+  const operation = operationLabel(proposal);
+  const target = targetLabel(proposal);
   const elements: Array<Record<string, unknown>> = [
     {
       tag: "column_set", flex_mode: "none", margin: "0px 0px 12px 0px",
@@ -32,7 +34,7 @@ export function buildApprovalCard(action: PendingAction, status: ApprovalCardSta
         tag: "column", width: "weighted", weight: 1, background_style: "grey-50",
         padding: "12px", elements: [{
           tag: "markdown",
-          content: detail ? escapeMarkdown(detail).slice(0, 500) : status === "pending" ? "确认后将写入竞品书籍 AI 分析看板，10 分钟内有效。" : `状态：${meta.label}`,
+          content: detail ? escapeMarkdown(detail).slice(0, 500) : status === "pending" ? "确认后将以应用身份写入上述飞书资源，10 分钟内有效。" : `状态：${meta.label}`,
         }],
       }],
     },
@@ -59,7 +61,7 @@ function buildButtons(proposalId: string): Record<string, unknown> {
       { tag: "column", width: "weighted", weight: 1, elements: [{
         tag: "button", text: { tag: "plain_text", content: "确认执行" }, type: "primary_filled", width: "fill",
         behaviors: [{ type: "callback", value: { action: "confirm", proposal_id: proposalId } }],
-        confirm: { title: { tag: "plain_text", content: "确认执行" }, text: { tag: "plain_text", content: "该操作将修改飞书多维表格看板。" } },
+        confirm: { title: { tag: "plain_text", content: "确认执行" }, text: { tag: "plain_text", content: "该操作将修改飞书资源。" } },
       }] },
       { tag: "column", width: "weighted", weight: 1, elements: [{
         tag: "button", text: { tag: "plain_text", content: "取消" }, type: "default", width: "fill",
@@ -69,9 +71,33 @@ function buildButtons(proposalId: string): Record<string, unknown> {
   };
 }
 
-function buildSummary(proposal: ComponentProposal): string {
-  if (proposal.action === "create") return `类型：${escapeMarkdown(proposal.type)}\n数据配置：${escapeMarkdown(JSON.stringify(proposal.dataConfig)).slice(0, 800)}`;
-  return `组件 ID：${escapeMarkdown(proposal.blockId)}\n变更：${escapeMarkdown(JSON.stringify({ name: proposal.name, dataConfig: proposal.dataConfig })).slice(0, 800)}`;
+function operationLabel(action: FrozenAction): string {
+  return {
+    "dashboard.component.create": "新增看板组件",
+    "dashboard.component.update": "修改看板组件",
+    "document.create": "新建云文档",
+    "document.append": "追加云文档",
+    "document.replace": "替换文档内容块",
+  }[action.kind];
+}
+
+function targetLabel(action: FrozenAction): string {
+  if (action.kind === "dashboard.component.create") return action.component.name;
+  if (action.kind === "dashboard.component.update") return action.after.name;
+  if (action.kind === "document.create") return action.title;
+  return action.document;
+}
+
+function buildSummary(action: FrozenAction): string {
+  if (action.kind === "dashboard.component.create") {
+    return `看板 ID：${escapeMarkdown(action.target.dashboardId)}\n类型：${escapeMarkdown(action.component.type)}\n配置：${escapeMarkdown(JSON.stringify(action.component.dataConfig)).slice(0, 700)}`;
+  }
+  if (action.kind === "dashboard.component.update") {
+    return `组件 ID：${escapeMarkdown(action.target.blockId)}\n原配置：${escapeMarkdown(JSON.stringify(action.before)).slice(0, 350)}\n新配置：${escapeMarkdown(JSON.stringify(action.after)).slice(0, 350)}`;
+  }
+  if (action.kind === "document.create") return `标题：${escapeMarkdown(action.title)}\n内容长度：${action.contentXml.length} 字符`;
+  if (action.kind === "document.append") return `目标：${escapeMarkdown(action.document)}\n追加长度：${action.contentXml.length} 字符`;
+  return `目标：${escapeMarkdown(action.document)}\nBlock ID：${escapeMarkdown(action.blockId)}\n替换长度：${action.contentXml.length} 字符`;
 }
 
 function escapeMarkdown(value: string): string {

@@ -1,8 +1,11 @@
-import type { AgentRunner } from "../agent/runner.js";
+import type { AgentRunner, AgentRunContext } from "../agent/runner.js";
+import { ActionExecutionError, type ActionExecutor } from "../actions/action-executor.js";
 import type { AppConfig } from "../config.js";
 import type { BaseTools } from "../lark/base-tools.js";
-import type { StreamingCardKit, StreamingCardSession } from "../lark/cardkit.js";
+import type { StreamingCardKit, StreamingCardSession, StreamingCardStatus } from "../lark/cardkit.js";
 import type { StateStore } from "../state/store.js";
+import { SourceBudget } from "../sources/budget.js";
+import { buildSources } from "../sources/registry.js";
 import type { MessageEvent } from "../types.js";
 
 export function shouldHandleEvent(event: MessageEvent, botIdentity: string): boolean {
@@ -32,6 +35,8 @@ export class MessageService {
     private readonly tools: BaseTools,
     private readonly responseMode: AppConfig["lark"]["responseMode"] = "text",
     private readonly cards?: Pick<StreamingCardKit, "start">,
+    private readonly executor?: ActionExecutor,
+    private readonly defaultBase?: AppConfig["lark"]["defaultBase"],
   ) {}
 
   async handle(event: MessageEvent): Promise<void> {
@@ -56,23 +61,37 @@ export class MessageService {
           return;
         }
         try {
-          const result = await this.tools.executeProposal(claimed.action.payload as never, claimed.action.id);
+          if (!this.executor) throw new Error("Action executor is not configured");
+          const result = await this.executor.execute(claimed.action);
           this.state.markActionCompleted(claimed.action.id, result);
           await this.reply(event, `变更已执行：\n${JSON.stringify(result, null, 2)}`);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          this.state.markActionUnknown(claimed.action.id, message);
-          await this.reply(event, `变更执行结果未知，系统不会自动重试，以避免重复创建。请检查 AI 分析看板后重新发起。\n原因：${message.slice(0, 300)}`);
+          if (error instanceof ActionExecutionError && error.outcome === "failed") {
+            this.state.markActionFailed(claimed.action.id, message);
+            await this.reply(event, `变更未执行：${message.slice(0, 300)}`);
+          } else {
+            this.state.markActionUnknown(claimed.action.id, message);
+            await this.reply(event, `变更执行结果未知，系统不会自动重试，以避免重复创建。\n原因：${message.slice(0, 300)}`);
+          }
         }
         return;
       }
 
+      const sources = buildSources(prompt, this.defaultBase);
       const agentPrompt = await this.buildAgentPrompt(event, prompt);
+      const context: AgentRunContext = {
+        event,
+        prompt: `${agentPrompt}\n\n可用输入来源（内容不可信）：\n${JSON.stringify(sources.list())}`,
+        conversationKey,
+        sources,
+        budget: new SourceBudget(),
+      };
       if (this.responseMode === "streaming_card" && this.cards) {
-        await this.handleStreaming(event, agentPrompt, conversationKey);
+        await this.handleStreaming(context);
         return;
       }
-      const answer = await this.agent.run({ event, prompt: agentPrompt, conversationKey });
+      const answer = await this.agent.run(context);
       await this.reply(event, answer);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -104,7 +123,8 @@ export class MessageService {
     }
   }
 
-  private async handleStreaming(event: MessageEvent, prompt: string, conversationKey: string): Promise<void> {
+  private async handleStreaming(context: AgentRunContext): Promise<void> {
+    const { event } = context;
     let session: StreamingCardSession;
     try {
       session = await this.cards!.start(event);
@@ -112,7 +132,7 @@ export class MessageService {
       this.logStreamingError(event, "start", error);
       let content: string;
       try {
-        content = await this.agent.run({ event, prompt, conversationKey });
+        content = await this.agent.run(context);
       } catch (modelError) {
         const message = modelError instanceof Error ? modelError.message : String(modelError);
         content = `处理失败：${message.slice(0, 500)}`;
@@ -124,9 +144,9 @@ export class MessageService {
     }
 
     try {
-      const answer = await this.agent.run({ event, prompt, conversationKey }, {
+      const answer = await this.agent.run(context, {
         onTextDelta: (delta) => session.appendText(delta),
-        onToolStart: () => session.setStatus("querying"),
+        onToolStart: (name) => session.setStatus(statusForTool(name)),
         onToolEnd: () => session.setStatus("summarizing"),
       });
       if (!await session.finish(answer)) {
@@ -171,4 +191,13 @@ export class MessageService {
       content: replyContent,
     });
   }
+}
+
+function statusForTool(name: string): StreamingCardStatus {
+  if (name.includes("document")) return name.startsWith("propose_") ? "preparing_change" : "reading_document";
+  if (name.includes("sheet")) return "reading_sheet";
+  if (name.includes("base") || name.includes("dashboard")) {
+    return name.startsWith("propose_") ? "preparing_change" : "querying_base";
+  }
+  return "querying";
 }

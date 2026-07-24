@@ -17,12 +17,12 @@ function pendingAction(): PendingAction {
     chatId: "oc_1",
     rootMessageId: "om_1",
     expiresAt: Date.now() + 600_000,
-    kind: "component.create",
+    kind: "dashboard.component.create",
     payload: {
-      action: "create",
-      name: "按书籍来源分布",
-      type: "ring",
-      dataConfig: { table_name: "竞品书籍快照", count_all: true },
+      kind: "dashboard.component.create",
+      target: { sourceId: "src_base", baseToken: "bas_1", dashboardId: "dash_1" },
+      component: { name: "按书籍来源分布", type: "ring", dataConfig: { table_name: "竞品书籍快照", count_all: true, group_by: [{ field_name: "来源", mode: "integrated" }] } },
+      idempotencyKey: "idem_1",
     },
   };
 }
@@ -42,12 +42,14 @@ describe("approval cards", () => {
     const state = new StateStore(":memory:");
     stores.push(state);
     state.createPendingAction(pendingAction());
+    const executor = {
+      execute: vi.fn(async () => ({ action: "created", block_id: "cht_1" })),
+    };
     const tools = {
-      executeProposal: vi.fn(async () => ({ action: "created", block_id: "cht_1" })),
       updateInteractiveCard: vi.fn(async () => ({})),
       sendToChat: vi.fn(async () => ({})),
     };
-    const service = new ApprovalService(state, tools as never);
+    const service = new ApprovalService(state, executor as never, tools as never);
 
     await service.handle({
       type: "card.action.trigger",
@@ -60,7 +62,7 @@ describe("approval cards", () => {
       action_value: JSON.stringify({ action: "confirm", proposal_id: "pa_1" }),
     });
 
-    expect(tools.executeProposal).toHaveBeenCalledTimes(1);
+    expect(executor.execute).toHaveBeenCalledTimes(1);
     expect(state.getPendingActionStatus("pa_1")).toBe("completed");
     expect(tools.updateInteractiveCard).toHaveBeenCalledTimes(2);
 
@@ -74,19 +76,19 @@ describe("approval cards", () => {
       action_tag: "button",
       action_value: JSON.stringify({ action: "confirm", proposal_id: "pa_1" }),
     });
-    expect(tools.executeProposal).toHaveBeenCalledTimes(1);
+    expect(executor.execute).toHaveBeenCalledTimes(1);
   });
 
   test("rejects another operator without consuming the proposal", async () => {
     const state = new StateStore(":memory:");
     stores.push(state);
     state.createPendingAction(pendingAction());
+    const executor = { execute: vi.fn() };
     const tools = {
-      executeProposal: vi.fn(),
       updateInteractiveCard: vi.fn(),
       sendToChat: vi.fn(async () => ({})),
     };
-    const service = new ApprovalService(state, tools as never);
+    const service = new ApprovalService(state, executor as never, tools as never);
 
     await service.handle({
       type: "card.action.trigger",
@@ -99,7 +101,7 @@ describe("approval cards", () => {
       action_value: JSON.stringify({ action: "confirm", proposal_id: "pa_1" }),
     });
 
-    expect(tools.executeProposal).not.toHaveBeenCalled();
+    expect(executor.execute).not.toHaveBeenCalled();
     expect(state.getPendingActionStatus("pa_1")).toBe("pending");
     expect(tools.sendToChat).toHaveBeenCalledWith("oc_1", expect.stringContaining("ou_other"));
   });

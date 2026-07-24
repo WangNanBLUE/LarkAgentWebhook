@@ -1,10 +1,14 @@
 import { AgentRunner } from "./agent/runner.js";
+import { ActionExecutor } from "./actions/action-executor.js";
+import { ActionService } from "./actions/action-service.js";
 import { loadConfig } from "./config.js";
 import { startHealthServer, type HealthState } from "./health.js";
 import { BaseTools } from "./lark/base-tools.js";
+import { BaseResource } from "./lark/base-resource.js";
 import { StreamingCardKit } from "./lark/cardkit.js";
 import { LarkCli } from "./lark/cli.js";
 import { EventConsumer } from "./lark/event-consumer.js";
+import { SourceReader } from "./lark/source-reader.js";
 import { MessageService } from "./service/message-service.js";
 import { ApprovalService } from "./service/approval-service.js";
 import { StateStore } from "./state/store.js";
@@ -15,6 +19,10 @@ async function main(): Promise<void> {
   const stateStore = new StateStore(config.statePath);
   const cli = new LarkCli(config.lark.binary);
   const baseTools = new BaseTools(cli, config, stateStore);
+  const sourceReader = new SourceReader(cli);
+  const baseResource = new BaseResource(cli);
+  const actionService = new ActionService(stateStore, baseResource, sourceReader, baseTools);
+  const actionExecutor = new ActionExecutor(cli, stateStore, baseResource, sourceReader);
   const health: HealthState = {
     startedAt: new Date().toISOString(),
     eventReady: false,
@@ -27,13 +35,14 @@ async function main(): Promise<void> {
   if (whoami.identity !== "bot" || whoami.available !== true || whoami.appId !== config.lark.expectedAppId) {
     throw new Error("lark-cli must use the 竞品分析 profile with strict-mode bot");
   }
-  await baseTools.getSourceSchema();
-  await baseTools.ensureDashboard();
-  await baseTools.reconcileExecutingActions();
+  if (config.lark.defaultBase) {
+    await baseTools.getSourceSchema();
+  }
+  await actionExecutor.reconcileExecutingActions();
   health.feishuReady = true;
   const healthServer = startHealthServer(config.health.host, config.health.port, health);
 
-  const agent = new AgentRunner(config, baseTools, stateStore);
+  const agent = new AgentRunner(config, baseTools, stateStore, undefined, sourceReader, baseResource, actionService);
   const cards = new StreamingCardKit(cli, baseTools);
   const botIdentity = config.lark.botOpenId || config.lark.botName;
   const service = new MessageService(
@@ -43,8 +52,10 @@ async function main(): Promise<void> {
     baseTools,
     config.lark.responseMode,
     cards,
+    actionExecutor,
+    config.lark.defaultBase,
   );
-  const approvalService = new ApprovalService(stateStore, baseTools);
+  const approvalService = new ApprovalService(stateStore, actionExecutor, baseTools);
   const messageConsumer = new EventConsumer<MessageEvent>(cli, "im.message.receive_v1");
   const approvalConsumer = new EventConsumer<CardActionEvent>(cli, "card.action.trigger");
   const ready = { messages: false, approvals: false };

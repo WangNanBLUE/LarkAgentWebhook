@@ -1,19 +1,25 @@
-import { randomUUID } from "node:crypto";
 import OpenAI from "openai";
 import type { Responses } from "openai/resources/responses/responses";
 import { z } from "zod";
 import type { AppConfig } from "../config.js";
+import type { ActionService } from "../actions/action-service.js";
 import { parseShanghaiDate } from "../date.js";
-import type { ComponentProposal, ComponentType, MessageEvent, PendingAction } from "../types.js";
+import { BaseResource } from "../lark/base-resource.js";
+import type { ComponentType, MessageEvent } from "../types.js";
 import { StateStore } from "../state/store.js";
 import { BaseTools } from "../lark/base-tools.js";
+import { SourceReader } from "../lark/source-reader.js";
+import type { SourceBudget } from "../sources/budget.js";
+import type { SourceRegistry } from "../sources/registry.js";
 import { AGENT_INSTRUCTIONS } from "./instructions.js";
 import { TOOL_DEFINITIONS } from "./tool-schemas.js";
 
-interface RunContext {
+export interface AgentRunContext {
   event: MessageEvent;
   prompt: string;
   conversationKey: string;
+  sources: SourceRegistry;
+  budget: SourceBudget;
 }
 
 export interface AgentRunObserver {
@@ -30,6 +36,17 @@ interface ToolTranscriptEntry {
   arguments: string;
   output: string;
 }
+
+const READ_ONLY_TOOLS = new Set([
+  "inspect_document",
+  "read_document",
+  "inspect_sheet",
+  "read_sheet",
+  "inspect_base",
+  "query_base",
+  "list_base_dashboards",
+  "get_dashboard_component",
+]);
 
 const aggregateArgsSchema = z.object({
   dimensions: z.array(z.object({ field_name: z.string().min(1), alias: z.string().min(1).nullable() })).max(5),
@@ -96,14 +113,18 @@ const chartCreateArgsSchema = z.object({
   }
 });
 
-const documentCreateArgsSchema = z.object({
-  title: z.string().min(1).max(200),
-  content_xml: z.string().min(1).max(100_000),
+const documentReadToolSchema = z.object({
+  source_id: z.string().min(1),
+  mode: z.enum(["keyword", "section", "range", "full"]),
+  keyword: z.string().nullable(),
+  start_block_id: z.string().nullable(),
+  end_block_id: z.string().nullable(),
 }).strict();
 
-const documentAppendArgsSchema = z.object({
-  document: z.string().min(1).max(1_000),
-  content_xml: z.string().min(1).max(100_000),
+const sheetReadToolSchema = z.object({
+  source_id: z.string().min(1),
+  sheet_id: z.string().min(1),
+  range: z.string().min(1),
 }).strict();
 
 export function buildChartComponentConfig(raw: unknown): {
@@ -157,20 +178,25 @@ export class AgentRunner {
     private readonly tools: BaseTools,
     private readonly state: StateStore,
     responses?: ResponsesClient,
+    private readonly sourceReader?: SourceReader,
+    private readonly baseResource?: BaseResource,
+    private readonly actionService?: ActionService,
   ) {
     this.responses = responses ?? new OpenAI({ baseURL: config.openai.baseURL, apiKey: config.openai.apiKey }).responses;
   }
 
-  async run(context: RunContext, observer?: AgentRunObserver): Promise<string> {
+  async run(context: AgentRunContext, observer?: AgentRunObserver): Promise<string> {
     const input: Responses.ResponseInput = [{ role: "user", content: context.prompt }];
     const toolTranscript: ToolTranscriptEntry[] = [];
     const deadline = Date.now() + this.config.agent.timeoutMs;
+    const toolDeadline = deadline - this.config.agent.finalResponseReserveMs;
     let displayedText = "";
     let useTextToolContinuation = this.textToolContinuationRequired;
 
     const requestRound = async (
       instructions: string,
       toolChoice?: "none",
+      requestDeadline = deadline,
     ): Promise<{ response: Responses.Response; roundText: string }> => {
       const params = (): ResponseStreamParams => {
         const textContinuation = useTextToolContinuation && toolTranscript.length > 0;
@@ -186,7 +212,7 @@ export class AgentRunner {
         };
       };
       const stream = async () => {
-        const remaining = deadline - Date.now();
+        const remaining = requestDeadline - Date.now();
         if (remaining <= 0) throw new Error("Agent request timed out");
         return this.streamResponse(params(), remaining, observer, (delta) => {
           displayedText += delta;
@@ -212,13 +238,21 @@ export class AgentRunner {
     };
 
     for (let round = 0; round < this.config.agent.maxToolRounds; round += 1) {
-      const { response, roundText } = await requestRound(AGENT_INSTRUCTIONS);
+      if (Date.now() >= toolDeadline) break;
+      let response: Responses.Response;
+      let roundText: string;
+      try {
+        ({ response, roundText } = await requestRound(AGENT_INSTRUCTIONS, undefined, toolDeadline));
+      } catch (error) {
+        if (isRequestAbort(error) && Date.now() >= toolDeadline) break;
+        throw error;
+      }
 
       const calls = response.output.filter((item): item is Responses.ResponseFunctionToolCall => item.type === "function_call");
       if (calls.length === 0) return response.output_text || roundText || "未生成有效回答。";
 
       input.push(...response.output);
-      for (const call of calls) {
+      const executeCall = async (call: Responses.ResponseFunctionToolCall): Promise<string> => {
         process.stdout.write(`${JSON.stringify({ timestamp: new Date().toISOString(), type: "agent.tool", round: round + 1, name: call.name, status: "started" })}\n`);
         let output: string;
         try {
@@ -230,9 +264,20 @@ export class AgentRunner {
           output = JSON.stringify({ ok: false, error: message });
           process.stdout.write(`${JSON.stringify({ timestamp: new Date().toISOString(), type: "agent.tool", round: round + 1, name: call.name, status: "failed", error: message.slice(0, 300) })}\n`);
         }
+        return output;
+      };
+      const outputs = calls.every((call) => READ_ONLY_TOOLS.has(call.name))
+        ? await Promise.all(calls.map(executeCall))
+        : await calls.reduce<Promise<string[]>>(async (pending, call) => {
+          const completed = await pending;
+          completed.push(await executeCall(call));
+          return completed;
+        }, Promise.resolve([]));
+      calls.forEach((call, index) => {
+        const output = outputs[index] ?? JSON.stringify({ ok: false, error: "Tool produced no output" });
         input.push({ type: "function_call_output", call_id: call.call_id, output });
         toolTranscript.push({ name: call.name, arguments: call.arguments, output });
-      }
+      });
       observer?.onToolEnd();
     }
     const { response: finalResponse, roundText } = await requestRound(
@@ -248,95 +293,150 @@ export class AgentRunner {
     observer: AgentRunObserver | undefined,
     appendDisplayedText: (delta: string) => string,
   ): Promise<{ response: Responses.Response; roundText: string }> {
-    const stream = this.responses.stream(params, { signal: AbortSignal.timeout(remaining) });
-    let roundText = "";
-    let terminalResponse: Responses.Response | undefined;
-    for await (const event of stream) {
-      if (event.type === "response.output_text.delta") {
-        roundText += event.delta;
-        observer?.onTextDelta(event.delta, appendDisplayedText(event.delta));
-      } else if (event.type === "response.output_item.added" && event.item.type === "function_call") {
-        observer?.onToolStart(event.item.name);
-      } else if (
-        event.type === "response.completed"
-        || event.type === "response.incomplete"
-        || event.type === "response.failed"
-      ) {
-        terminalResponse = event.response;
+    const controller = new AbortController();
+    let timeout: NodeJS.Timeout | undefined;
+    const resetTimeout = (milliseconds: number) => {
+      if (timeout) clearTimeout(timeout);
+      timeout = setTimeout(() => controller.abort(), milliseconds);
+    };
+    resetTimeout(remaining);
+    try {
+      const stream = this.responses.stream(params, { signal: controller.signal });
+      let roundText = "";
+      let terminalResponse: Responses.Response | undefined;
+      for await (const event of stream) {
+        if (event.type === "response.output_text.delta") {
+          if (observer) resetTimeout(this.config.agent.timeoutMs);
+          roundText += event.delta;
+          observer?.onTextDelta(event.delta, appendDisplayedText(event.delta));
+        } else if (event.type === "response.output_item.added" && event.item.type === "function_call") {
+          observer?.onToolStart(event.item.name);
+        } else if (
+          event.type === "response.completed"
+          || event.type === "response.incomplete"
+          || event.type === "response.failed"
+        ) {
+          terminalResponse = event.response;
+        }
       }
+      const response = terminalResponse ?? await stream.finalResponse();
+      if (response.status && response.status !== "completed") {
+        const reason = response.incomplete_details?.reason ?? response.error?.message ?? response.status;
+        throw new Error(`Agent response ${response.status}: ${reason}`);
+      }
+      return { response, roundText };
+    } finally {
+      if (timeout) clearTimeout(timeout);
     }
-    const response = terminalResponse ?? await stream.finalResponse();
-    if (response.status && response.status !== "completed") {
-      const reason = response.incomplete_details?.reason ?? response.error?.message ?? response.status;
-      throw new Error(`Agent response ${response.status}: ${reason}`);
-    }
-    return { response, roundText };
   }
 
-  private async executeTool(name: string, args: Record<string, unknown>, context: RunContext): Promise<unknown> {
+  private async executeTool(name: string, args: Record<string, unknown>, context: AgentRunContext): Promise<unknown> {
     switch (name) {
-      case "get_source_schema": return this.tools.getSourceSchema();
-      case "resolve_snapshot_date": return this.tools.resolveSnapshotDate(args.requested_date as string | null);
-      case "aggregate_books": return this.tools.dataQuery(buildAggregateQuery(args), String(args.snapshot_date));
-      case "query_books": return this.tools.searchRecords({
-        keyword: String(args.keyword), searchFields: args.search_fields as string[], selectFields: args.select_fields as string[], limit: Number(args.limit), snapshotDate: String(args.snapshot_date),
-      });
-      case "list_managed_components": return this.tools.listManagedComponents();
-      case "get_managed_component": return this.tools.getManagedComponent(String(args.block_id));
-      case "create_document": {
-        const parsed = documentCreateArgsSchema.parse(args);
-        return this.tools.createDocument(parsed.title, parsed.content_xml);
+      case "list_input_sources":
+        return context.sources.list();
+      case "inspect_document": {
+        const source = context.sources.require(String(args.source_id));
+        return source.kind === "wiki"
+          ? requireSourceReader(this.sourceReader).resolveWiki(source, context.budget)
+          : requireSourceReader(this.sourceReader).inspectDocument(source, context.budget);
       }
-      case "append_document": {
-        const parsed = documentAppendArgsSchema.parse(args);
-        return this.tools.appendDocument(parsed.document, parsed.content_xml);
+      case "read_document": {
+        const input = documentReadToolSchema.parse(args);
+        const source = context.sources.require(input.source_id);
+        const reader = requireSourceReader(this.sourceReader);
+        if (input.mode === "keyword") {
+          if (!input.keyword) throw new Error("keyword mode requires keyword");
+          return reader.readDocument(source, { mode: "keyword", keyword: input.keyword }, context.budget);
+        }
+        if (input.mode === "section") {
+          if (!input.start_block_id) throw new Error("section mode requires start_block_id");
+          return reader.readDocument(source, { mode: "section", start_block_id: input.start_block_id }, context.budget);
+        }
+        if (input.mode === "range") {
+          return reader.readDocument(source, {
+            mode: "range",
+            ...(input.start_block_id ? { start_block_id: input.start_block_id } : {}),
+            ...(input.end_block_id ? { end_block_id: input.end_block_id } : {}),
+          }, context.budget);
+        }
+        return reader.readDocument(source, { mode: "full" }, context.budget);
       }
-      case "propose_chart_component_create": {
-        const chart = buildChartComponentConfig(args);
-        const proposal = this.tools.validateProposal({
-          action: "create", name: chart.name, type: chart.type,
-          dataConfig: addDashboardDateFilter(chart.dataConfig, this.config.lark.snapshotField, chart.snapshotDate),
-        });
-        return this.saveProposal(proposal, context);
+      case "inspect_sheet": {
+        const source = context.sources.require(String(args.source_id));
+        return requireSourceReader(this.sourceReader).inspectSheet(source);
       }
-      case "propose_text_component_create": {
-        const proposal = this.tools.validateProposal({
-          action: "create", name: String(args.name), type: "text", dataConfig: { text: String(args.text) },
-        });
-        return this.saveProposal(proposal, context);
+      case "read_sheet": {
+        const input = sheetReadToolSchema.parse(args);
+        const source = context.sources.require(input.source_id);
+        return requireSourceReader(this.sourceReader).readSheet(source, {
+          sheet_id: input.sheet_id,
+          range: input.range,
+        }, context.budget);
       }
-      case "propose_component_update": {
-        const proposal = this.tools.validateProposal({
-          action: "update", blockId: String(args.block_id),
-          name: args.name === null ? undefined : String(args.name),
-          dataConfig: args.data_config_json === null ? undefined : addDashboardDateFilter(JSON.parse(String(args.data_config_json)) as Record<string, unknown>, this.config.lark.snapshotField, String(args.snapshot_date)),
-        });
-        return this.saveProposal(proposal, context);
+      case "inspect_base": {
+        const source = context.sources.require(String(args.source_id));
+        const base = requireBaseResource(this.baseResource);
+        const location = await base.resolve(source);
+        const [blocks, tables] = await Promise.all([base.listBlocks(location), base.listTables(location)]);
+        const requestedTableId = args.table_id === null || args.table_id === undefined ? undefined : String(args.table_id);
+        const tableIds = extractListedTableIds(tables);
+        const linkedTableId = location.tableId && tableIds.includes(location.tableId) ? location.tableId : undefined;
+        const tableId = requestedTableId ?? linkedTableId ?? (tableIds.length === 1 ? tableIds[0] : undefined);
+        const fields = tableId ? await base.fields(location, tableId) : undefined;
+        return {
+          source_id: source.id,
+          source_type: "base",
+          title: source.title,
+          default_table_id: tableId ?? null,
+          blocks,
+          tables,
+          ...(fields ? { fields } : {}),
+        };
       }
+      case "query_base": {
+        const source = context.sources.require(String(args.source_id));
+        const base = requireBaseResource(this.baseResource);
+        const location = await base.resolve(source);
+        return base.query(location, source, {
+          table_id: String(args.table_id),
+          dimensions: args.dimensions as never,
+          measures: args.measures as never,
+          filters: args.filters as never,
+          filter_conjunction: args.filter_conjunction as "and" | "or",
+          sort: args.sort as never,
+          limit: Number(args.limit),
+        }, context.budget);
+      }
+      case "list_base_dashboards": {
+        const source = context.sources.require(String(args.source_id));
+        const base = requireBaseResource(this.baseResource);
+        const location = await base.resolve(source);
+        const dashboards = await base.listDashboards(location);
+        const dashboardId = args.dashboard_id === null || args.dashboard_id === undefined ? undefined : String(args.dashboard_id);
+        return {
+          source_id: source.id,
+          dashboards,
+          ...(dashboardId ? { components: await base.listDashboardBlocks(location, dashboardId) } : {}),
+        };
+      }
+      case "get_dashboard_component": {
+        const source = context.sources.require(String(args.source_id));
+        const base = requireBaseResource(this.baseResource);
+        const location = await base.resolve(source);
+        return base.getDashboardBlock(location, String(args.dashboard_id), String(args.block_id));
+      }
+      case "propose_dashboard_component_create":
+        return requireActionService(this.actionService).proposeDashboardCreate(actionContext(context), args);
+      case "propose_dashboard_component_update":
+        return requireActionService(this.actionService).proposeDashboardUpdate(actionContext(context), args);
+      case "propose_document_create":
+        return requireActionService(this.actionService).proposeDocumentCreate(actionContext(context), args);
+      case "propose_document_append":
+        return requireActionService(this.actionService).proposeDocumentAppend(actionContext(context), args);
+      case "propose_document_replace":
+        return requireActionService(this.actionService).proposeDocumentReplace(actionContext(context), args);
       default: throw new Error(`Unsupported tool: ${name}`);
     }
-  }
-
-  private async saveProposal(proposal: ComponentProposal, context: RunContext): Promise<unknown> {
-    const action: PendingAction = {
-      id: `pa_${randomUUID()}`,
-      requesterId: context.event.sender_id,
-      chatId: context.event.chat_id,
-      rootMessageId: context.event.root_id ?? context.event.message_id,
-      threadId: context.conversationKey,
-      expiresAt: Date.now() + 10 * 60_000,
-      kind: proposal.action === "create" ? "component.create" : "component.update",
-      payload: proposal,
-    };
-    this.state.createPendingAction(action);
-    let approvalCardSent = true;
-    try { await this.tools.sendApprovalCard(action); }
-    catch { approvalCardSent = false; }
-    return {
-      ok: true, proposal_id: action.id, expires_in_minutes: 10, proposal,
-      approval_card_sent: approvalCardSent,
-      confirmation: approvalCardSent ? "请在审批卡片中点击“确认执行”或“取消”。" : "审批卡片发送失败，请在同一聊天中回复：确认",
-    };
   }
 }
 
@@ -358,6 +458,54 @@ function buildTextToolContinuation(prompt: string, transcript: ToolTranscriptEnt
 function isUpstream502(error: unknown): boolean {
   const candidate = error as { status?: number; message?: string };
   return candidate?.status === 502 || candidate?.message?.startsWith("502 ") === true;
+}
+
+function isRequestAbort(error: unknown): boolean {
+  const candidate = error as { name?: string; message?: string };
+  return candidate?.name === "AbortError"
+    || candidate?.name === "APIUserAbortError"
+    || candidate?.message === "Request was aborted.";
+}
+
+function extractListedTableIds(value: unknown): string[] {
+  if (!value || typeof value !== "object") return [];
+  const tables = (value as { tables?: unknown }).tables;
+  if (!Array.isArray(tables)) return [];
+  return tables.flatMap((table) => {
+    if (!table || typeof table !== "object") return [];
+    const record = table as { id?: unknown; table_id?: unknown };
+    const id = typeof record.id === "string"
+      ? record.id
+      : typeof record.table_id === "string"
+        ? record.table_id
+        : undefined;
+    return id ? [id] : [];
+  });
+}
+
+function requireSourceReader(reader: SourceReader | undefined): SourceReader {
+  if (!reader) throw new Error("Source reader is not configured");
+  return reader;
+}
+
+function requireBaseResource(resource: BaseResource | undefined): BaseResource {
+  if (!resource) throw new Error("Base resource reader is not configured");
+  return resource;
+}
+
+function requireActionService(service: ActionService | undefined): ActionService {
+  if (!service) throw new Error("Action proposal service is not configured");
+  return service;
+}
+
+function actionContext(context: AgentRunContext) {
+  return {
+    requesterId: context.event.sender_id,
+    chatId: context.event.chat_id,
+    rootMessageId: context.event.root_id ?? context.event.message_id,
+    threadId: context.conversationKey,
+    sources: context.sources,
+  };
 }
 
 export function addDashboardDateFilter(config: Record<string, unknown>, snapshotField: string, snapshotDate: string): Record<string, unknown> {

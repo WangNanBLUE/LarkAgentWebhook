@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ActionExecutionError, type ActionExecutor } from "../actions/action-executor.js";
 import { buildApprovalCard } from "../lark/approval-card.js";
 import type { BaseTools } from "../lark/base-tools.js";
 import type { StateStore } from "../state/store.js";
@@ -10,7 +11,11 @@ const actionSchema = z.object({
 }).strict();
 
 export class ApprovalService {
-  constructor(private readonly state: StateStore, private readonly tools: BaseTools) {}
+  constructor(
+    private readonly state: StateStore,
+    private readonly executor: ActionExecutor,
+    private readonly tools: BaseTools,
+  ) {}
 
   async handle(event: CardActionEvent): Promise<void> {
     if (event.action_tag !== "button" || !this.state.markMessageProcessed(event.event_id)) return;
@@ -29,13 +34,15 @@ export class ApprovalService {
     if (!claimed.ok) return this.notifyUnavailable(event, claimed.reason);
     await this.tools.updateInteractiveCard(event.token, buildApprovalCard(claimed.action, "executing")).catch(() => undefined);
     try {
-      const result = await this.tools.executeProposal(claimed.action.payload as never, claimed.action.id);
+      const result = await this.executor.execute(claimed.action);
       this.state.markActionCompleted(claimed.action.id, result);
       await this.tools.updateInteractiveCard(event.token, buildApprovalCard(claimed.action, "completed", JSON.stringify(result))).catch(() => undefined);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.state.markActionUnknown(claimed.action.id, message);
-      await this.tools.updateInteractiveCard(event.token, buildApprovalCard(claimed.action, "unknown", message)).catch(() => undefined);
+      const status = error instanceof ActionExecutionError ? error.outcome : "unknown";
+      if (status === "failed") this.state.markActionFailed(claimed.action.id, message);
+      else this.state.markActionUnknown(claimed.action.id, message);
+      await this.tools.updateInteractiveCard(event.token, buildApprovalCard(claimed.action, status, message)).catch(() => undefined);
     }
   }
 

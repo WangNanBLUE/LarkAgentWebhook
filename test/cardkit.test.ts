@@ -101,7 +101,7 @@ describe("CardKit streaming", () => {
 
     expect(contentWrites).toHaveLength(3);
     expect(contentWrites.map((write) => write.body.sequence)).toEqual([1, 2, 3]);
-    expect(contentWrites[0]?.body.content).toBe("正在查询看板数据");
+    expect(contentWrites[0]?.body.content).toBe("正在处理数据");
     expect(contentWrites[1]?.body.content).toBe(`${ANSWER_PREFIX}分析完成`);
     expect(contentWrites[2]?.body.content).toBe("分析完成");
     expect(settingsWrite?.method).toBe("PATCH");
@@ -109,6 +109,53 @@ describe("CardKit streaming", () => {
     expect(JSON.parse(String(settingsWrite?.body.settings))).toMatchObject({
       config: { streaming_mode: false, summary: { content: "分析完成" } },
     });
+  });
+
+  test("keeps only the latest pending answer snapshot while a card update is in flight", async () => {
+    vi.useFakeTimers();
+    let releaseFirstWrite: (() => void) | undefined;
+    let writeCount = 0;
+    let blockWrites = false;
+    const firstWrite = new Promise<void>((resolve) => {
+      releaseFirstWrite = resolve;
+    });
+    const cli = {
+      runRetryable: vi.fn(async (_args: string[]) => {
+        writeCount += 1;
+        if (blockWrites && writeCount === 1) await firstWrite;
+        return { card_id: "card_1" };
+      }),
+    };
+    const tools = { replyCard: vi.fn(async () => ({})) };
+    const session = await new StreamingCardKit(cli as never, tools as never).start({
+      message_id: "om_slow",
+      chat_id: "oc_1",
+      sender_id: "ou_1",
+      chat_type: "p2p",
+      content: "分析",
+    });
+    cli.runRetryable.mockClear();
+    writeCount = 0;
+    blockWrites = true;
+
+    session.appendText("A");
+    await vi.advanceTimersByTimeAsync(250);
+    session.appendText("B");
+    await vi.advanceTimersByTimeAsync(250);
+    session.appendText("C");
+    await vi.advanceTimersByTimeAsync(250);
+    const finishing = session.finish("ABC");
+    releaseFirstWrite?.();
+    expect(await finishing).toBe(true);
+
+    const answerWrites = cli.runRetryable.mock.calls
+      .map((call) => call[0] as string[])
+      .filter((args) => args[2]?.endsWith(`/elements/${ANSWER_ELEMENT_ID}/content`))
+      .map((args) => JSON.parse(args[args.indexOf("--data") + 1] ?? "{}") as { content?: string });
+    expect(answerWrites.map((write) => write.content)).toEqual([
+      `${ANSWER_PREFIX}A`,
+      `${ANSWER_PREFIX}ABC`,
+    ]);
   });
 
   test("stops CardKit writes after the first terminal update failure", async () => {
