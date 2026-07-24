@@ -86,7 +86,10 @@ export class MessageService {
         return;
       }
 
-      const sources = buildSources(prompt, this.defaultBase);
+      const fixedUrls = event.chat_type === "group"
+        ? this.groupSources?.listUrls(event.chat_id) ?? []
+        : [];
+      const sources = buildSources(prompt, this.defaultBase, fixedUrls);
       const agentPrompt = await this.buildAgentPrompt(event, prompt);
       const context: AgentRunContext = {
         event,

@@ -591,6 +591,101 @@ describe("message routing", () => {
     );
   });
 
+  test("injects and deduplicates fixed group sources for normal analysis", async () => {
+    const event = {
+      message_id: "om_fixed_analysis",
+      chat_id: "oc_group",
+      sender_id: "ou_sender",
+      chat_type: "group" as const,
+      content: "@竞品分析 分析 https://tenant.feishu.cn/docx/a?b=2&a=1",
+      mentions: [{ id: "ou_bot", key: "@_user_1", name: "竞品分析" }],
+    };
+    const state = new StateStore(":memory:");
+    stores.push(state);
+    state.bindGroupSources("oc_group", [{
+      url: "https://tenant.feishu.cn/docx/a?a=1&b=2",
+      kind: "document",
+    }], "ou_configurer");
+    const agent = { run: vi.fn(async (_context: AgentRunContext) => "完成") };
+    const tools = { reply: vi.fn(async () => ({})), sendToChat: vi.fn(async () => ({})) };
+    const groupSources = new GroupSourceService(state);
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    await new MessageService(
+      "ou_bot", state, agent as never, tools as never, "text",
+      undefined, undefined, undefined, groupSources,
+    ).handle(event);
+    write.mockRestore();
+
+    const linked = agent.run.mock.calls[0]?.[0].sources.list()
+      .filter((source: { kind: string }) => source.kind !== "text");
+    expect(linked).toEqual([expect.objectContaining({ kind: "document", title: "a" })]);
+  });
+
+  test("never injects group sources into private analysis", async () => {
+    const event = {
+      message_id: "om_private_analysis",
+      chat_id: "oc_same",
+      sender_id: "ou_sender",
+      chat_type: "p2p" as const,
+      content: "分析当前文本",
+    };
+    const state = new StateStore(":memory:");
+    stores.push(state);
+    state.bindGroupSources("oc_same", [{
+      url: "https://tenant.feishu.cn/docx/a",
+      kind: "document",
+    }], "ou_configurer");
+    const agent = { run: vi.fn(async (_context: AgentRunContext) => "完成") };
+    const tools = { reply: vi.fn(async () => ({})), sendToChat: vi.fn(async () => ({})) };
+    const groupSources = new GroupSourceService(state);
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    await new MessageService(
+      "ou_bot", state, agent as never, tools as never, "text",
+      undefined, undefined, undefined, groupSources,
+    ).handle(event);
+    write.mockRestore();
+
+    expect(agent.run.mock.calls[0]?.[0].sources.list()).toEqual([
+      expect.objectContaining({ kind: "text" }),
+    ]);
+  });
+
+  test("does not call the agent when fixed and temporary sources exceed five", async () => {
+    const event = {
+      message_id: "om_fixed_overflow",
+      chat_id: "oc_group",
+      sender_id: "ou_sender",
+      chat_type: "group" as const,
+      content: "@竞品分析 分析 https://tenant.feishu.cn/docx/current",
+      mentions: [{ id: "ou_bot", key: "@_user_1", name: "竞品分析" }],
+    };
+    const state = new StateStore(":memory:");
+    stores.push(state);
+    state.bindGroupSources("oc_group", Array.from({ length: 5 }, (_, index) => ({
+      url: `https://tenant.feishu.cn/docx/f${index}`,
+      kind: "document" as const,
+    })), "ou_configurer");
+    const agent = { run: vi.fn() };
+    const tools = { reply: vi.fn(async () => ({})), sendToChat: vi.fn(async () => ({})) };
+    const groupSources = new GroupSourceService(state);
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    await new MessageService(
+      "ou_bot", state, agent as never, tools as never, "text",
+      undefined, undefined, undefined, groupSources,
+    ).handle(event);
+    write.mockRestore();
+
+    expect(agent.run).not.toHaveBeenCalled();
+    expect(tools.reply).toHaveBeenCalledWith(
+      "om_fixed_overflow",
+      expect.stringContaining("先解绑本群固定来源"),
+      false,
+    );
+  });
+
   test("includes the directly replied message as quoted agent context", async () => {
     const event = {
       message_id: "om_reply",

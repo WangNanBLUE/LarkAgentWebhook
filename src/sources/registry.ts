@@ -31,7 +31,9 @@ export class SourceRegistry {
       const parsed = parseFeishuSourceUrl(raw);
       parsedLinks.set(parsed.normalizedUrl, parsed);
     }
-    if (parsedLinks.size > 5) throw new Error("At most 5 Feishu links are allowed per message");
+    if (parsedLinks.size > 5) {
+      throw new Error("At most 5 Feishu links are allowed per request；请减少当前链接或先解绑本群固定来源");
+    }
 
     const sources = new Map<string, InputSource>();
     const text = prompt.replace(URL_PATTERN, " ").replace(/\s+/gu, " ").trim();
