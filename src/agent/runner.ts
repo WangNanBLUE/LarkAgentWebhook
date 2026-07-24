@@ -293,29 +293,41 @@ export class AgentRunner {
     observer: AgentRunObserver | undefined,
     appendDisplayedText: (delta: string) => string,
   ): Promise<{ response: Responses.Response; roundText: string }> {
-    const stream = this.responses.stream(params, { signal: AbortSignal.timeout(remaining) });
-    let roundText = "";
-    let terminalResponse: Responses.Response | undefined;
-    for await (const event of stream) {
-      if (event.type === "response.output_text.delta") {
-        roundText += event.delta;
-        observer?.onTextDelta(event.delta, appendDisplayedText(event.delta));
-      } else if (event.type === "response.output_item.added" && event.item.type === "function_call") {
-        observer?.onToolStart(event.item.name);
-      } else if (
-        event.type === "response.completed"
-        || event.type === "response.incomplete"
-        || event.type === "response.failed"
-      ) {
-        terminalResponse = event.response;
+    const controller = new AbortController();
+    let timeout: NodeJS.Timeout | undefined;
+    const resetTimeout = (milliseconds: number) => {
+      if (timeout) clearTimeout(timeout);
+      timeout = setTimeout(() => controller.abort(), milliseconds);
+    };
+    resetTimeout(remaining);
+    try {
+      const stream = this.responses.stream(params, { signal: controller.signal });
+      let roundText = "";
+      let terminalResponse: Responses.Response | undefined;
+      for await (const event of stream) {
+        if (event.type === "response.output_text.delta") {
+          if (observer) resetTimeout(this.config.agent.timeoutMs);
+          roundText += event.delta;
+          observer?.onTextDelta(event.delta, appendDisplayedText(event.delta));
+        } else if (event.type === "response.output_item.added" && event.item.type === "function_call") {
+          observer?.onToolStart(event.item.name);
+        } else if (
+          event.type === "response.completed"
+          || event.type === "response.incomplete"
+          || event.type === "response.failed"
+        ) {
+          terminalResponse = event.response;
+        }
       }
+      const response = terminalResponse ?? await stream.finalResponse();
+      if (response.status && response.status !== "completed") {
+        const reason = response.incomplete_details?.reason ?? response.error?.message ?? response.status;
+        throw new Error(`Agent response ${response.status}: ${reason}`);
+      }
+      return { response, roundText };
+    } finally {
+      if (timeout) clearTimeout(timeout);
     }
-    const response = terminalResponse ?? await stream.finalResponse();
-    if (response.status && response.status !== "completed") {
-      const reason = response.incomplete_details?.reason ?? response.error?.message ?? response.status;
-      throw new Error(`Agent response ${response.status}: ${reason}`);
-    }
-    return { response, roundText };
   }
 
   private async executeTool(name: string, args: Record<string, unknown>, context: AgentRunContext): Promise<unknown> {

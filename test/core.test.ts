@@ -346,6 +346,55 @@ describe("agent streaming", () => {
     expect(responses.stream).toHaveBeenCalledTimes(2);
   });
 
+  test("keeps an active visible text stream alive beyond the absolute deadline", async () => {
+    const completedResponse = {
+      output: [{ type: "message" }],
+      output_text: "分析完成",
+      status: "completed",
+    };
+    const responses = {
+      stream: vi.fn((_params: unknown, options: { signal: AbortSignal }) => {
+        const wait = (milliseconds: number) => new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(resolve, milliseconds);
+          const abort = () => {
+            clearTimeout(timer);
+            reject(new Error("Request was aborted."));
+          };
+          if (options.signal.aborted) abort();
+          else options.signal.addEventListener("abort", abort, { once: true });
+        });
+        return {
+          async *[Symbol.asyncIterator]() {
+            yield { type: "response.output_text.delta", delta: "分析" };
+            await wait(50);
+            yield { type: "response.output_text.delta", delta: "完成" };
+            await wait(50);
+            yield { type: "response.completed", response: completedResponse };
+          },
+          finalResponse: vi.fn(async () => completedResponse),
+        };
+      }),
+    };
+    const config = loadConfig(configEnv);
+    Object.assign(config.agent, { timeoutMs: 80, finalResponseReserveMs: 20 });
+    const observer = {
+      onTextDelta: vi.fn(),
+      onToolStart: vi.fn(),
+      onToolEnd: vi.fn(),
+    };
+    const runner = new AgentRunner(config, {} as never, {} as never, responses as never);
+
+    await expect(runner.run({
+      event: { message_id: "om_long_stream", chat_id: "oc_1", sender_id: "ou_1", chat_type: "p2p", content: "分析" },
+      prompt: "分析",
+      conversationKey: "om_long_stream",
+      ...sourceContext("分析"),
+    }, observer)).resolves.toBe("分析完成");
+
+    expect(observer.onTextDelta).toHaveBeenCalledTimes(2);
+    expect(responses.stream).toHaveBeenCalledTimes(1);
+  });
+
   test("falls back to textual tool results when the upstream rejects function outputs", async () => {
     const call = {
       type: "function_call",
