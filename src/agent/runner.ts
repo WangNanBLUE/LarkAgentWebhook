@@ -38,6 +38,7 @@ interface ToolTranscriptEntry {
 }
 
 const READ_ONLY_TOOLS = new Set([
+  "inspect_folder",
   "inspect_document",
   "read_document",
   "inspect_sheet",
@@ -334,6 +335,10 @@ export class AgentRunner {
     switch (name) {
       case "list_input_sources":
         return context.sources.list();
+      case "inspect_folder": {
+        const source = context.sources.require(String(args.source_id));
+        return requireSourceReader(this.sourceReader).inspectFolder(source, context.budget);
+      }
       case "inspect_document": {
         const source = context.sources.require(String(args.source_id));
         return source.kind === "wiki"

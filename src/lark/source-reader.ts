@@ -31,6 +31,29 @@ type SheetReadInput = z.input<typeof sheetReadSchema>;
 export class SourceReader {
   constructor(private readonly cli: LarkCli) {}
 
+  async inspectFolder(source: InputSource, budget: SourceBudget): Promise<SourceReadResult> {
+    assertSource(source, ["folder"]);
+    const folderToken = requireFolderToken(source);
+    const data = await this.cli.runRetryable<unknown>([
+      "drive", "files", "list",
+      "--folder-token", folderToken,
+      "--page-size", "200",
+      "--as", "bot",
+      "--format", "json",
+    ]);
+    const listing = normalizeFolderListing(data);
+    const bounded = budget.take(source.id, JSON.stringify(listing.files));
+    return logged(source, {
+      source_id: source.id,
+      source_type: "folder",
+      title: source.title,
+      range: "direct_children:first_200",
+      complete: !listing.hasMore && !bounded.truncated,
+      truncated: listing.hasMore || bounded.truncated,
+      content: bounded.text,
+    });
+  }
+
   async inspectDocument(source: InputSource, budget: SourceBudget): Promise<SourceReadResult> {
     assertSource(source, ["document", "wiki"]);
     const data = await this.cli.runRetryable<unknown>([
@@ -209,6 +232,36 @@ function assertSource(source: InputSource, kinds: InputSource["kind"][]): void {
 function requireUrl(source: InputSource): string {
   if (!source.url) throw new Error(`Source ${source.id} does not have a URL`);
   return source.url;
+}
+
+function requireFolderToken(source: InputSource): string {
+  const url = new URL(requireUrl(source));
+  const parts = url.pathname.split("/").filter(Boolean);
+  const token = parts[0] === "drive" && parts[1] === "folder" ? parts[2] : undefined;
+  if (!token) throw new Error(`Source ${source.id} does not have a folder token`);
+  return token;
+}
+
+function normalizeFolderListing(value: unknown): {
+  files: Array<{ name: string; type: string; url?: string; modified_time?: string }>;
+  hasMore: boolean;
+} {
+  const record = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const rawFiles = Array.isArray(record.files) ? record.files : [];
+  return {
+    files: rawFiles.slice(0, 200).flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const file = item as Record<string, unknown>;
+      if (typeof file.name !== "string" || typeof file.type !== "string") return [];
+      return [{
+        name: file.name,
+        type: file.type,
+        ...(typeof file.url === "string" ? { url: file.url } : {}),
+        ...(typeof file.modified_time === "string" ? { modified_time: file.modified_time } : {}),
+      }];
+    }),
+    hasMore: record.has_more === true || rawFiles.length > 200,
+  };
 }
 
 function findString(value: unknown, keys: string[]): string | undefined {

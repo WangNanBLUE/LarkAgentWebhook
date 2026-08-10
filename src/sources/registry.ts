@@ -4,6 +4,7 @@ import type { InputSource, SourceDescriptor, SourceKind } from "./types.js";
 const URL_PATTERN = /https?:\/\/[^\s<>"']+/gu;
 const TRAILING_PUNCTUATION = /[.,，。!！?？;；)）\]】]+$/u;
 const KIND_BY_PREFIX: Array<[string, SourceKind]> = [
+  ["/drive/folder/", "folder"],
   ["/docx/", "document"],
   ["/wiki/", "wiki"],
   ["/sheets/", "sheet"],

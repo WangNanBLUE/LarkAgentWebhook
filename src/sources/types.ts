@@ -1,4 +1,4 @@
-export type SourceKind = "text" | "document" | "sheet" | "base" | "wiki";
+export type SourceKind = "text" | "document" | "sheet" | "base" | "wiki" | "folder";
 
 export interface ResolvedBaseSource {
   baseToken: string;

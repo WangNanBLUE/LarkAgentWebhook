@@ -70,11 +70,17 @@ export class GroupSourceService {
       this.log(event, command, "rejected", 0);
       return "存在不支持的链接；仅接受飞书 Docx、Wiki、Sheets 和 Base HTTPS 链接。";
     }
+    if (parsed.some(({ kind }) => kind === "folder")) {
+      return "文件夹链接仅支持单次分析，暂不能设为群聊固定来源。";
+    }
 
     if (command === "固定来源") {
       const result = this.state.bindGroupSources(
         event.chat_id,
-        parsed.map(({ normalizedUrl, kind }) => ({ url: normalizedUrl, kind })),
+        parsed.map(({ normalizedUrl, kind }) => ({
+          url: normalizedUrl,
+          kind: kind as "document" | "wiki" | "sheet" | "base",
+        })),
         event.sender_id,
       );
       this.log(event, command, "completed", result.added.length, parsed.map(({ kind }) => kind));

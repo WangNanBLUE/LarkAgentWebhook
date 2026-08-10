@@ -64,6 +64,7 @@ describe("configuration", () => {
   test("exposes source-bound readers without URL or Base token arguments", () => {
     const names = TOOL_DEFINITIONS.map((tool) => tool.name);
     expect(names).toEqual(expect.arrayContaining([
+      "inspect_folder",
       "inspect_document",
       "read_document",
       "inspect_sheet",

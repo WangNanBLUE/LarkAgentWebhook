@@ -33,15 +33,16 @@ describe("source registry", () => {
     expect(() => SourceRegistry.fromPrompt(url)).toThrow();
   });
 
-  test("supports document, wiki and both sheet path variants", () => {
+  test("supports folder, document, wiki and both sheet path variants", () => {
     const registry = SourceRegistry.fromPrompt([
+      "https://a.feishu.cn/drive/folder/folder1",
       "https://a.feishu.cn/docx/doc1",
       "https://a.feishu.cn/wiki/wiki1",
       "https://a.feishu.cn/sheets/sheet1",
       "https://a.feishu.cn/spreadsheets/sheet2",
-    ].join(" "), { idFactory: ids("src_doc", "src_wiki", "src_sheet_1", "src_sheet_2") });
+    ].join(" "), { idFactory: ids("src_folder", "src_doc", "src_wiki", "src_sheet_1", "src_sheet_2") });
 
-    expect(registry.list().map(({ kind }) => kind)).toEqual(["document", "wiki", "sheet", "sheet"]);
+    expect(registry.list().map(({ kind }) => kind)).toEqual(["folder", "document", "wiki", "sheet", "sheet"]);
   });
 
   test("normalizes supported Feishu source URLs", () => {

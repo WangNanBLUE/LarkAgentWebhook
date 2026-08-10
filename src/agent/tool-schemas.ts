@@ -26,6 +26,12 @@ const dataConfig = { type: "object", additionalProperties: true };
 
 export const TOOL_DEFINITIONS: Responses.FunctionTool[] = [
   {
+    type: "function", name: "inspect_folder", description: "列出飞书云盘文件夹的直接子项，最多 200 个，不递归读取文件内容。",
+    strict: true, parameters: object({
+      source_id: { type: "string", pattern: "^src_[A-Za-z0-9-]+$" },
+    }, ["source_id"]),
+  },
+  {
     type: "function", name: "inspect_document", description: "读取 Docx/Wiki 文档目录。只接受本轮 source_id，不接受链接或 token。",
     strict: true, parameters: object({
       source_id: { type: "string", pattern: "^src_[A-Za-z0-9-]+$" },

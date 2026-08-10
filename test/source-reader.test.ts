@@ -14,6 +14,40 @@ function linkedSources() {
 }
 
 describe("Lark source reader", () => {
+  test("lists at most the first 200 direct folder children as bot", async () => {
+    const cli = { runRetryable: vi.fn(async () => ({
+      files: Array.from({ length: 201 }, (_, index) => ({
+        name: `方案 ${index + 1}`,
+        type: "docx",
+        url: `https://a.feishu.cn/docx/doc_${index + 1}`,
+        modified_time: "1",
+      })),
+      has_more: false,
+    })) };
+    const source = SourceRegistry.fromPrompt(
+      "https://a.feishu.cn/drive/folder/fld_1",
+      { idFactory: () => "src_folder" },
+    ).require("src_folder");
+
+    const result = await new SourceReader(cli as never).inspectFolder(source, new SourceBudget());
+    expect(result).toMatchObject({
+      source_id: "src_folder",
+      source_type: "folder",
+      range: "direct_children:first_200",
+      complete: false,
+      truncated: true,
+      content: expect.stringContaining('"name":"方案 200"'),
+    });
+    expect(result.content).not.toContain('"name":"方案 201"');
+    expect(cli.runRetryable).toHaveBeenCalledWith([
+      "drive", "files", "list",
+      "--folder-token", "fld_1",
+      "--page-size", "200",
+      "--as", "bot",
+      "--format", "json",
+    ]);
+  });
+
   test("reads document keyword matches and sheet ranges as bot", async () => {
     const cli = {
       runRetryable: vi.fn()
